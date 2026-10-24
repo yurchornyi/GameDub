@@ -1,0 +1,13 @@
+# Never publish: settings with API keys, game list, logs
+data/
+
+# Built program and downloaded models (get them with src/tools/build.ps1 and src/tools/get-models.ps1)
+app/
+models/
+
+# Build and tool caches
+_build/
+_tools/
+**/bin/
+**/obj/
+*.user
