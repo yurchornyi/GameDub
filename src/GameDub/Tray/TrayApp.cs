@@ -110,7 +110,7 @@ public sealed class TrayApp : ApplicationContext
             {
                 _pids = hit.Value.pids;
                 _hwnd = ProcessMatcher.MainWindow(_pids);
-                if (_pipe == null || _pipe.Game.Id != hit.Value.game.Id)
+                if (_pipe == null || _pipe.Game.Id != hit.Value.game.Id || _pipe.Game.SubLang != hit.Value.game.SubLang)
                 {
                     StopPipe();
                     _pipe = new DubPipeline(hit.Value.game, _s, () => _hwnd, ShowOsd);

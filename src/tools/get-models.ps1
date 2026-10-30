@@ -27,4 +27,9 @@ Get-Files 'TigreGotico/opus-mt-tc-big-en-zle-onnx' "$root\opus-mt-tc-big-en-uk" 
     'int8/config.json', 'int8/generation_config.json', 'int8/source.spm', 'int8/target.spm', 'int8/vocab.json',
     'int8/tokenizer_config.json', 'int8/special_tokens_map.json', 'int8/encoder_model.onnx', 'int8/decoder_model.onnx') 'int8/'
 
+Write-Host 'opus-mt ru->uk - offline translation of Russian subtitles (Helsinki-NLP, CC-BY 4.0), ~110 MB'
+Get-Files 'Xenova/opus-mt-ru-uk' "$root\opus-mt-ru-uk" @(
+    'config.json', 'generation_config.json', 'tokenizer.json', 'tokenizer_config.json', 'vocab.json',
+    'onnx/encoder_model_quantized.onnx', 'onnx/decoder_model_quantized.onnx') 'onnx/'
+
 Write-Host 'Done.'

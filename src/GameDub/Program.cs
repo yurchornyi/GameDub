@@ -106,6 +106,32 @@ public static class Program
                 o.AppendLine($"{tr.Text}  [mood: {tr.Mood ?? "-"}{(tr.Offline ? ", offline" : "")}]");
                 break;
             }
+            case "ru":
+            {
+                // --test ru <image|-> <text>: Russian OCR on an image (optional), then online + offline RU→UK
+                string line = string.Join(" ", a.Skip(2));
+                if (a[1] != "-")
+                {
+                    using var bmp = new Bitmap(a[1]);
+                    using var argb = new Bitmap(bmp.Width, bmp.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                    using (var gr = Graphics.FromImage(argb)) gr.DrawImage(bmp, 0, 0, bmp.Width, bmp.Height);
+                    var ocr = new OcrService("ru");
+                    var lines = await ocr.RecognizeAsync(argb);
+                    foreach (var l in lines) o.AppendLine("ocr: " + l.Text);
+                    line = TextTools.Clean(lines);
+                    o.AppendLine("clean: " + line);
+                }
+                var (sp, body) = Speakers.Split(line);
+                body = TextTools.FixCaps(body);
+                var gender = sp == null ? "m" : Speakers.GuessGender(sp);
+                o.AppendLine($"speaker={sp ?? "-"} gender={gender}");
+                var on = await new GoogleTranslator("ru").TranslateAsync(body, CancellationToken.None);
+                o.AppendLine("online:  " + on);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var off = OfflineTranslator.For("ru").Translate(body);
+                o.AppendLine($"offline: {off}  ({sw.ElapsedMilliseconds} ms incl. load)");
+                break;
+            }
             case "pipeline":
             {
                 // --test pipeline <english line>: exactly what the game path does (hybrid translation + auto voice), then play

@@ -70,12 +70,16 @@ public sealed class OcrService
 {
     readonly OcrEngine _engine;
 
-    public OcrService()
+    public OcrService(string subLang = "en")
     {
-        _engine = OcrEngine.TryCreateFromLanguage(new Language("en-US"))
-                  ?? OcrEngine.TryCreateFromUserProfileLanguages()
-                  ?? throw new InvalidOperationException("Windows OCR (en-US) is not available");
+        var tag = subLang == "ru" ? "ru-RU" : "en-US";
+        // No fallback to another language: reading Cyrillic with the English engine gives garbage.
+        _engine = OcrEngine.TryCreateFromLanguage(new Language(tag))
+                  ?? throw new InvalidOperationException($"Windows OCR ({tag}) is not available");
     }
+
+    public static bool IsAvailable(string subLang) =>
+        OcrEngine.IsLanguageSupported(new Language(subLang == "ru" ? "ru-RU" : "en-US"));
 
     /// <summary>
     /// Subtitles are almost always light text with a dark outline or shadow. Keeping only
@@ -128,7 +132,8 @@ public static class TextTools
         var parts = new List<string>();
         foreach (var l in lines)
         {
-            var t = l.Text.Replace('|', 'I').Replace('’', '\'').Replace('“', '"').Replace('”', '"').Trim();
+            var t = l.Text.Replace('’', '\'').Replace('“', '"').Replace('”', '"').Trim();
+            if (!t.Any(c => c is >= 'Ѐ' and <= 'ӿ')) t = t.Replace('|', 'I'); // a misread capital I in Latin text
             int letters = t.Count(char.IsLetter);
             if (letters < 3 || letters < t.Length * 0.5) continue;
             parts.Add(t);

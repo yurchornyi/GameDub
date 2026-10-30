@@ -30,15 +30,16 @@ public static class Http
 public sealed class GoogleTranslator : ITranslator
 {
     const string Ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
-    readonly string _lang;
+    readonly string _lang, _from;
     readonly Dictionary<string, string> _cache = new();
     readonly (string name, Func<string, CancellationToken, Task<string>> run)[] _endpoints;
     readonly long[] _restUntil;
     string? _bingIg, _bingToken, _bingKey;
     long _bingTokenAt;
 
-    public GoogleTranslator(string lang = "uk")
+    public GoogleTranslator(string from = "en", string lang = "uk")
     {
+        _from = from;
         _lang = lang;
         _endpoints = new (string, Func<string, CancellationToken, Task<string>>)[]
         {
@@ -94,7 +95,7 @@ public sealed class GoogleTranslator : ITranslator
     // The endpoint Chrome's built-in translator uses; far less rate-limited than gtx.
     async Task<string> GoogleChrome(string text, CancellationToken ct)
     {
-        var body = await Send(Get($"https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=en&tl={_lang}&q={Uri.EscapeDataString(text)}"), ct);
+        var body = await Send(Get($"https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl={_from}&tl={_lang}&q={Uri.EscapeDataString(text)}"), ct);
         using var doc = JsonDocument.Parse(body);
         var first = doc.RootElement[0];
         return (first.ValueKind == JsonValueKind.String ? first.GetString() : first[0].GetString()) ?? "";
@@ -102,7 +103,7 @@ public sealed class GoogleTranslator : ITranslator
 
     async Task<string> GoogleGtx(string text, CancellationToken ct)
     {
-        var body = await Send(Get($"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl={_lang}&dt=t&q={Uri.EscapeDataString(text)}"), ct);
+        var body = await Send(Get($"https://translate.googleapis.com/translate_a/single?client=gtx&sl={_from}&tl={_lang}&dt=t&q={Uri.EscapeDataString(text)}"), ct);
         using var doc = JsonDocument.Parse(body);
         var sb = new StringBuilder();
         foreach (var seg in doc.RootElement[0].EnumerateArray())
@@ -125,7 +126,7 @@ public sealed class GoogleTranslator : ITranslator
         req.Headers.TryAddWithoutValidation("User-Agent", Ua);
         req.Content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
-            ["fromLang"] = "en", ["to"] = _lang, ["text"] = text, ["token"] = _bingToken!, ["key"] = _bingKey!,
+            ["fromLang"] = _from, ["to"] = _lang, ["text"] = text, ["token"] = _bingToken!, ["key"] = _bingKey!,
         });
         string body;
         try { body = await Send(req, ct); }
@@ -137,7 +138,7 @@ public sealed class GoogleTranslator : ITranslator
 
     async Task<string> MyMemory(string text, CancellationToken ct)
     {
-        var body = await Send(Get($"https://api.mymemory.translated.net/get?q={Uri.EscapeDataString(text)}&langpair=en|{_lang}"), ct);
+        var body = await Send(Get($"https://api.mymemory.translated.net/get?q={Uri.EscapeDataString(text)}&langpair={_from}|{_lang}"), ct);
         using var doc = JsonDocument.Parse(body);
         var res = doc.RootElement.GetProperty("responseData").GetProperty("translatedText").GetString() ?? "";
         if (res.Contains("MYMEMORY WARNING", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("mymemory quota (429)");
@@ -149,21 +150,22 @@ public sealed class GoogleTranslator : ITranslator
 public sealed class LlmTranslator : ITranslator
 {
     readonly AppSettings _s;
-    readonly string _game;
+    readonly string _game, _sourceName;
     readonly GoogleTranslator _fallback;
     readonly Queue<string> _history = new();
 
-    public LlmTranslator(AppSettings s, string game)
+    public LlmTranslator(AppSettings s, string game, string from = "en")
     {
         _s = s; _game = game;
-        _fallback = new GoogleTranslator();
+        _sourceName = from == "ru" ? "Russian" : "English";
+        _fallback = new GoogleTranslator(from);
     }
 
     public async Task<Translation> TranslateAsync(string text, string? speaker, string gender, CancellationToken ct)
     {
         try
         {
-            var system = $"You translate English subtitles of the video game \"{_game}\" into Ukrainian for voice-over. " +
+            var system = $"You translate {_sourceName} subtitles of the video game \"{_game}\" into Ukrainian for voice-over. " +
                          "Use natural, spoken, emotionally matching language that fits the game's setting. " +
                          "Keep character and place names consistent (transliterate them). " +
                          "Use the speaker's grammatical gender for first-person verb and adjective forms.\n" +
@@ -251,10 +253,10 @@ public static class TranslatorFactory
 {
     public static bool HasLlmKey(AppSettings s) => (s.LlmProvider == "openai" ? s.OpenAiApiKey : s.LlmApiKey).Length > 0;
 
-    public static ITranslator Create(AppSettings s, string game)
+    public static ITranslator Create(AppSettings s, string game, string from = "en")
     {
-        ITranslator online = s.Translator == "llm" && HasLlmKey(s) ? new LlmTranslator(s, game) : new GoogleTranslator();
-        return OfflineTranslator.IsInstalled ? new HybridTranslator(online, OfflineTranslator.Shared) : online;
+        ITranslator online = s.Translator == "llm" && HasLlmKey(s) ? new LlmTranslator(s, game, from) : new GoogleTranslator(from);
+        return OfflineTranslator.IsInstalled(from) ? new HybridTranslator(online, OfflineTranslator.For(from)) : online;
     }
 }
 

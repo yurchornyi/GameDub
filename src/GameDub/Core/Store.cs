@@ -98,6 +98,7 @@ public sealed class GameEntry
     public string? Cover { get; set; }
     public bool Enabled { get; set; }
     public DateTime LastEnabledUtc { get; set; }
+    public string SubLang { get; set; } = "en";   // language of the game's subtitles: en | ru
 }
 
 public sealed class RelRect

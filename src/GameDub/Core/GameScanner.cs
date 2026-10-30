@@ -29,6 +29,7 @@ public static class GameScanner
             {
                 g.Enabled = old.Enabled;
                 g.LastEnabledUtc = old.LastEnabledUtc;
+                g.SubLang = old.SubLang;
             }
             result.Add(g);
         }

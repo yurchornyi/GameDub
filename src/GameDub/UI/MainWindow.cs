@@ -152,7 +152,7 @@ public sealed class MainWindow : Window
     {
         _page = "games";
         SetTabs();
-        Hints(("A", "Увімк./вимк. переклад"), ("Y", "Скинути область субтитрів"), ("B", "Закрити"));
+        Hints(("A", "Увімк./вимк. переклад"), ("X", "Мова субтитрів"), ("Y", "Скинути область"), ("B", "Закрити"));
         var wrap = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Center }; // no dead band on the right
         KeyboardNavigation.SetDirectionalNavigation(wrap, KeyboardNavigationMode.Contained);
         Button? focus = null;
@@ -203,6 +203,13 @@ public sealed class MainWindow : Window
             HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top,
         };
         grid.Children.Add(badge);
+        if (g.SubLang == "ru")
+            grid.Children.Add(new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(200, 0, 0, 0)), CornerRadius = new CornerRadius(6), Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(8),
+                HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
+                Child = new TextBlock { Text = "RU → UA", FontSize = 14, FontWeight = FontWeights.Bold, Foreground = White },
+            });
         var b = new Button { Style = _tile, Content = grid, Tag = g, Padding = new Thickness(0) };
         void Paint()
         {
@@ -539,6 +546,7 @@ public sealed class MainWindow : Window
         if ((b & Gamepad.A) != 0 && focused is Button btn) { btn.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); return; }
         if ((b & Gamepad.B) != 0) { Back(); return; }
         if ((b & Gamepad.Y) != 0 && _page == "games" && focused?.Tag is GameEntry g) { ResetRegion(g); return; }
+        if ((b & Gamepad.X) != 0 && _page == "games" && focused?.Tag is GameEntry sub) { ToggleSubLang(sub); return; }
         if ((b & Gamepad.Y) != 0 && focused?.Tag is Row { Remove: { } remove }) { remove(); return; }
         if ((b & Gamepad.X) != 0 && focused is Button { Content: Grid grid } && grid.Children.OfType<TextBox>().FirstOrDefault()?.Tag is Action<string> paste)
         {
@@ -646,6 +654,17 @@ public sealed class MainWindow : Window
         Margin = margin, VerticalAlignment = VerticalAlignment.Center,
         Child = new TextBlock { Text = text, FontSize = 14, FontWeight = FontWeights.Bold, Foreground = Hex("#C8CCD2"), VerticalAlignment = VerticalAlignment.Center },
     };
+
+    void ToggleSubLang(GameEntry g)
+    {
+        var next = g.SubLang == "ru" ? "en" : "ru";
+        if (!OcrService.IsAvailable(next)) { Toast("Немає пакета розпізнавання цієї мови у Windows"); return; }
+        g.SubLang = next;
+        Store.SaveGames(_games);
+        _games = Store.LoadGames();
+        ShowGames(g.Id);
+        Toast($"«{g.Name}»: субтитри {(next == "ru" ? "російські" : "англійські")} → озвучка українська");
+    }
 
     void ResetRegion(GameEntry g)
     {

@@ -518,10 +518,11 @@ public static class AudioPlayer
 
 public static class Speakers
 {
-    static readonly Regex Colon = new(@"^\s*([A-Z][\w'.\-]*(?:\s+[A-Z][\w'.\-]*){0,2})\s*[:：]\s*(.{2,})$", RegexOptions.Singleline);
+    static readonly Regex Colon = new(@"^\s*(\p{Lu}[\w'.\-]*(?:\s+\p{Lu}[\w'.\-]*){0,2})\s*[:：]\s*(.{2,})$", RegexOptions.Singleline);
     static readonly Regex Bracket = new(@"^\s*\[([^\]]{1,30})\]\s*(.{2,})$", RegexOptions.Singleline);
     static readonly HashSet<string> NotSpeakers = new(StringComparer.OrdinalIgnoreCase)
-        { "Note", "Tip", "Hint", "Objective", "Warning", "Mission", "Quest", "Info", "Press", "Hold", "New", "Reward", "Location", "Chapter" };
+        { "Note", "Tip", "Hint", "Objective", "Warning", "Mission", "Quest", "Info", "Press", "Hold", "New", "Reward", "Location", "Chapter",
+          "Совет", "Подсказка", "Цель", "Внимание", "Задание", "Миссия", "Квест", "Нажмите", "Удерживайте", "Новое", "Награда", "Локация", "Глава", "Примечание" };
 
     /// <summary>Splits "John: Hello" into ("John", "Hello"); speaker is null for narrator lines.</summary>
     public static (string? speaker, string line) Split(string text)
@@ -545,11 +546,21 @@ public static class Speakers
         "wife","grandma","aunt","madam","miss","mrs","ms","nun","witch","daughter","duchess","empress","goddess","priestess",
     };
 
+    static readonly HashSet<string> FemaleWordsRu = new(StringComparer.OrdinalIgnoreCase)
+        { "мать", "мама", "сестра", "королева", "принцесса", "девушка", "женщина", "жена", "бабушка", "тётя", "тетя", "госпожа", "дочь", "ведьма", "монахиня", "любовь" };
+    static readonly HashSet<string> MaleWordsRu = new(StringComparer.OrdinalIgnoreCase)
+        { "никита", "илья", "лука", "фома", "кузьма", "миша", "саша", "паша", "дима", "вова", "коля", "ваня", "петя", "вася", "гриша", "лёша", "леша", "сережа", "серёжа", "женя", "дядя", "папа", "глава", "старшина", "судья", "слуга", "мужчина" };
+
     public static string GuessGender(string name)
     {
-        foreach (var w in name.ToLowerInvariant().Split(new[] { ' ', '.', '-' }, StringSplitOptions.RemoveEmptyEntries))
-            if (FemaleNames.Contains(w)) return "f";
+        var words = name.ToLowerInvariant().Split(new[] { ' ', '.', '-' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var w in words)
+        {
+            if (FemaleNames.Contains(w) || FemaleWordsRu.Contains(w)) return "f";
+            if (MaleWordsRu.Contains(w)) return "m";
+        }
         var first = name.Split(' ')[0].ToLowerInvariant();
+        if (first.Any(c => c is >= 'Ѐ' and <= 'ӿ')) return first.Length > 2 && first[^1] is 'а' or 'я' ? "f" : "m";
         string[] femaleEndings = { "a", "ie", "ette", "elle", "ine", "lyn", "issa", "ah" };
         string[] maleExceptions = { "joshua", "luca", "nikita", "sasha", "ezra", "elijah", "noah", "jonah", "isaiah", "micah", "dakota", "andrea" };
         if (first.Length > 2 && femaleEndings.Any(first.EndsWith) && !maleExceptions.Contains(first)) return "f";

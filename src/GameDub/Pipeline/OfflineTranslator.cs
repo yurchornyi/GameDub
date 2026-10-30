@@ -20,19 +20,28 @@ namespace GameDub.Pipeline;
 /// </summary>
 public sealed class OfflineTranslator : ITranslator, IDisposable
 {
-    static readonly string[] Candidates = { "opus-mt-tc-big-en-uk", "opus-mt-en-uk" };
+    static string[] Candidates(string from) => from == "ru" ? new[] { "opus-mt-ru-uk" } : new[] { "opus-mt-tc-big-en-uk", "opus-mt-en-uk" };
 
-    public static string? FindModelDir() => Candidates.Select(c => Path.Combine(Paths.Root, "models", c)).FirstOrDefault(d =>
+    public static string? FindModelDir(string from = "en") => Candidates(from).Select(c => Path.Combine(Paths.Root, "models", c)).FirstOrDefault(d =>
         Directory.Exists(d)
         && Directory.GetFiles(d, "encoder_model*.onnx").Length > 0
         && Directory.GetFiles(d, "decoder_model*.onnx").Length > 0
         && File.Exists(Path.Combine(d, "config.json"))
         && (File.Exists(Path.Combine(d, "tokenizer.json")) || File.Exists(Path.Combine(d, "source.spm"))));
 
-    public static bool IsInstalled => FindModelDir() != null;
+    public static bool IsInstalled(string from = "en") => FindModelDir(from) != null;
 
-    static OfflineTranslator? _shared;
-    public static OfflineTranslator Shared => _shared ??= new OfflineTranslator(FindModelDir()!);
+    // One loaded model per source language; sessions are heavy, so they are shared across pipelines.
+    static readonly Dictionary<string, OfflineTranslator> Loaded = new();
+
+    public static OfflineTranslator For(string from)
+    {
+        lock (Loaded)
+        {
+            if (!Loaded.TryGetValue(from, out var t)) Loaded[from] = t = new OfflineTranslator(FindModelDir(from)!);
+            return t;
+        }
+    }
 
     readonly string _dir;
     long _eos = 0, _pad = 61586, _langToken = -1; // Marian: decoder_start_token_id == pad_token_id

@@ -1,6 +1,6 @@
 # GameDub
 
-Автоматичний переклад англійських субтитрів в іграх українською — з озвучкою.
+Автоматичний переклад англійських і російських субтитрів в іграх українською — з озвучкою.
 Зроблено для портативної приставки **ASUS ROG Xbox Ally X** (Windows 11), але працює на будь-якому ПК з Windows 10/11.
 
 Розпізнає субтитри на екрані (вбудований OCR Windows) → перекладає українською → озвучує окремими голосами для персонажів.
@@ -13,7 +13,7 @@
 | Крок | З інтернетом | Без інтернету |
 |---|---|---|
 | Субтитри | Windows.Media.Ocr | те саме |
-| Переклад | Google / Bing / MyMemory (безкоштовно), за бажанням LLM | офлайн-модель Helsinki-NLP opus-mt-tc-big (en→uk) |
+| Переклад | Google / Bing / MyMemory (безкоштовно), за бажанням LLM | офлайн-моделі Helsinki-NLP: opus-mt-tc-big (en→uk), opus-mt (ru→uk) |
 | Голос | ElevenLabs → Google HD → OpenAI (за наявності ключів) | Supertonic 3 (офлайн) → Edge |
 
 Перемикання автоматичне. Служба в треї сама вмикає переклад, коли запускається гра з галочкою, і вимикає, коли гра закривається.
@@ -23,18 +23,20 @@
 1. Потрібен **.NET 8 Desktop Runtime**.
 2. Склонуй репозиторій у `C:\GameDub`.
 3. Збери програму: `src\tools\build.ps1` (сам завантажить .NET SDK у `C:\GameDub\_build`; після збирання цю папку можна видалити).
-4. (Необов'язково) офлайн-моделі: `src\tools\get-models.ps1` (~740 МБ у `C:\GameDub\models`).
-5. Запусти `C:\GameDub\app\GameDub.exe`.
+4. (Необов'язково) офлайн-моделі: `src\tools\get-models.ps1` (~850 МБ у `C:\GameDub\models`).
+5. (Для російських субтитрів) пакет розпізнавання Windows, від адміністратора: `Add-WindowsCapability -Online -Name 'Language.OCR~~~ru-RU~0.0.1.0'`.
+6. Запусти `C:\GameDub\app\GameDub.exe`.
 
 Ключі API **не потрібні** — усе працює безкоштовно. Ключі ElevenLabs / Google / OpenAI можна додати в налаштуваннях для живіших голосів; вони зберігаються лише локально в `data\config.json`.
 
 ## Як користуватися
 
 1. Відкрий GameDub, на плитці гри натисни **A** — з'явиться зелена галочка.
-2. Запусти гру: англійські субтитри **увімкнені**, режим екрана — **Borderless / Без рамки**.
-3. Далі все автоматично: перший раз програма за кілька секунд сама знаходить область субтитрів.
+2. Якщо субтитри в грі російські, натисни на плитці **X** — з'явиться мітка «RU → UA».
+3. Запусти гру: субтитри **увімкнені**, режим екрана — **Borderless / Без рамки**.
+4. Далі все автоматично: перший раз програма за кілька секунд сама знаходить область субтитрів.
 
-**Керування:** A — увімк./вимк. гру · Y — скинути область · LB/RB — Ігри/Налаштування · B — назад · X — вставити з буфера.
+**Керування:** A — увімк./вимк. гру · X — мова субтитрів (на плитці гри) або вставити з буфера (у полі ключа) · Y — скинути область · LB/RB — Ігри/Налаштування · B — назад.
 
 **Гарячі клавіші в грі:**
 - `Pause` (або `Ctrl+Alt+P`) — пауза перекладу
@@ -64,7 +66,7 @@
 Сторонні компоненти:
 - `src/GameDub/Pipeline/EdgeDrm.cs` — порт коду з [rany2/edge-tts](https://github.com/rany2/edge-tts) (LGPL-3.0).
 - `src/GameDub/Pipeline/Supertonic.cs` — на основі прикладу [supertone-inc/supertonic](https://github.com/supertone-inc/supertonic) (MIT).
-- Моделі (завантажуються окремо): [Supertonic 3](https://huggingface.co/Supertone/supertonic-3) — OpenRAIL-M; [opus-mt-tc-big-en-zle](https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-en-zle) — CC-BY 4.0.
+- Моделі (завантажуються окремо): [Supertonic 3](https://huggingface.co/Supertone/supertonic-3) — OpenRAIL-M; [opus-mt-tc-big-en-zle](https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-en-zle) і [opus-mt-ru-uk](https://huggingface.co/Helsinki-NLP/opus-mt-ru-uk) — CC-BY 4.0.
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime) — MIT.
 
 Програма використовує неофіційні безкоштовні сервіси (Microsoft Edge Read Aloud, Google Translate, Bing Translator), які можуть змінитися без попередження.

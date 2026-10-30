@@ -39,7 +39,7 @@ public sealed class DubPipeline : IDisposable
     {
         Game = game; _s = s; _window = window; _osd = osd;
         _profile = Store.LoadProfile(game.Id);
-        _translator = TranslatorFactory.Create(s, game.Name);
+        _translator = TranslatorFactory.Create(s, game.Name, game.SubLang);
         _tts = Voices.CreateEngine(s);
     }
 
@@ -80,7 +80,7 @@ public sealed class DubPipeline : IDisposable
     async Task CaptureLoop(CancellationToken ct)
     {
         OcrService ocr;
-        try { ocr = new OcrService(); }
+        try { ocr = new OcrService(Game.SubLang); }
         catch (Exception ex) { Log.Error("ocr init", ex); _osd("GameDub: OCR недоступний"); return; }
 
         while (!ct.IsCancellationRequested)
@@ -122,7 +122,7 @@ public sealed class DubPipeline : IDisposable
         var line = _tracker.Push(_lastText);
         if (line != null)
         {
-            Log.Write("EN: " + line);
+            Log.Write($"{Game.SubLang.ToUpperInvariant()}: {line}");
             _lines.Writer.TryWrite((line, Environment.TickCount64));
         }
         return _lastText.Length > 0 ? _s.OcrIntervalMs : _s.OcrIntervalMs + 200;
