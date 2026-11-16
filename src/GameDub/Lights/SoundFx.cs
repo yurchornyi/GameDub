@@ -149,8 +149,10 @@ public sealed class SoundFx : IDisposable
                 var prompts = File.ReadAllLines(PromptsFile).Skip(1).Select(l => l.Split(',', 3)).Where(p => p.Length == 3).ToList();
                 _prompts = prompts.Select(p => p[2].Trim().Trim('"')).ToArray();
                 _crashIdx = prompts.Where(p => p[1] == "crash").Select(p => int.Parse(p[0])).ToArray();
-                // two threads: a crash is checked rarely, and the light should not wait
-                _clap = new InferenceSession(ClapFile, new SessionOptions { IntraOpNumThreads = 2, InterOpNumThreads = 1, ExecutionMode = ExecutionMode.ORT_SEQUENTIAL });
+                // two threads: a crash is checked rarely, and the light should not wait; no memory arena: the memory a
+                // check works in (~50-100 MB for its 10 s) goes back at once instead of being kept for the next one
+                _clap = new InferenceSession(ClapFile, new SessionOptions { IntraOpNumThreads = 2, InterOpNumThreads = 1,
+                    ExecutionMode = ExecutionMode.ORT_SEQUENTIAL, EnableCpuMemArena = false });
                 t0 = Stopwatch.GetTimestamp();
                 Crash(new float[Window]);
                 clapNote = $"crash model {Stopwatch.GetElapsedTime(t0).TotalMilliseconds:F0} ms";
