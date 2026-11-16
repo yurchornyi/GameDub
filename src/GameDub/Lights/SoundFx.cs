@@ -22,8 +22,9 @@ public enum SoundKind { Impact, Siren, Horn, Shot }
 /// in two ways:
 /// - Sudden sounds (shots, explosions, crashes, breaking glass) are judged one by one, at once: 60 ms
 ///   after every sharp onset (a jump in loudness between 10 ms blocks) the model is asked about the second that ends
-///   there. A shot needs gunfire over 0.2, more than any blast or footsteps, and a loudness of at least a third of the
-///   loudest shot lately, so a footstep amid a fight stays dark. Tuned on recordings of Call of Duty, GTA 5 and
+///   there. A shot needs gunfire over 0.2, more than any blast or footsteps, and a loudness of at least 15 % of the
+///   loudest shot lately (a third dropped most far shots, GTA 5, 16.11). Within 300 ms of a shot, a sound at least
+///   40 % as loud is the next shot of the burst and flashes at once. Tuned on recordings of Call of Duty, GTA 5 and
 ///   Wreckfest (16.11): shots flash about 0.07 s after they are heard, each shot of a burst on its own; footsteps,
 ///   speech and music do not; a race flashes no shots. Tried and dropped: looks twice a second (up to a second late),
 ///   a cut alone in silence (the model averages over its second: "Silence"), a cut repeated over the second
@@ -48,7 +49,7 @@ public sealed class SoundFx : IDisposable
     static readonly string[] DoorNames = { "Door", "Sliding door", "Slam", "Knock", "Tap", "Thump, thud", "Bang" };
     static readonly string[] GunNames = { "Gunshot, gunfire", "Machine gun", "Fusillade", "Artillery fire", "Cap gun" };
     static readonly string[] FootNames = { "Walk, footsteps", "Run", "Shuffle" };
-    const double GunScore = 0.2, ShotLoudness = 0.35, ImpactScore = 0.35, SirenScore = 0.3, SirenKeep = 0.25;
+    const double GunScore = 0.2, ShotLoudness = 0.15, ImpactScore = 0.35, SirenScore = 0.3, SirenKeep = 0.25;
     static readonly string[] SirenNames = { "Siren", "Civil defense siren", "Police car (siren)", "Ambulance (siren)", "Fire engine, fire truck (siren)",
         "Alarm", "Car alarm", "Smoke detector, smoke alarm", "Fire alarm" };
     static readonly string[] HornNames = { "Vehicle horn, car horn, honking", "Air horn, truck horn", "Train horn", "Foghorn" };
@@ -73,7 +74,7 @@ public sealed class SoundFx : IDisposable
     int _busy;
     // loudness over 10 ms blocks: silence skips the model, and an onset starts a sudden sound's cut
     double _block; int _blockN;
-    readonly double[] _recent = new double[5];  // the last 50 ms of block loudness, for onsets
+    readonly double[] _recent = new double[3];  // the last 30 ms of block loudness, for onsets
     int _recentN;
     long _lastOnset = long.MinValue / 2;
     readonly List<(long at, double rms)> _onsets = new();      // onsets waiting for their 100 ms after
@@ -204,7 +205,7 @@ public sealed class SoundFx : IDisposable
         if (ready != null) foreach (var (around, rms) in ready) Hand(around, rms);
     }
 
-    /// <summary>Every 10 ms block: the loudness for the silence gate, and an onset, a jump to 1.8 times the last 50 ms.</summary>
+    /// <summary>Every 10 ms block: the loudness for the silence gate, and an onset, a jump to 1.6 times the last 30 ms.</summary>
     void Gate(float v)
     {
         _block += v * v;
@@ -215,13 +216,15 @@ public sealed class SoundFx : IDisposable
         double before = 0; for (int i = 0; i < _recent.Length; i++) before += _recent[i];
         before /= _recent.Length;
         _recent[_recentN++ % _recent.Length] = rms;
-        if (rms < 0.01 || rms < 1.8 * before || _samples - _lastOnset < OnsetGap) return;
+        // 1.6 times the last 30 ms: within a burst the sound does not fall far between shots (1.8 over 50 ms missed
+        // most shots of a burst in GTA 5, 16.11)
+        if (rms < 0.01 || rms < 1.6 * before || _samples - _lastOnset < OnsetGap) return;
         _lastOnset = _samples;
         if (_onsets.Count < 8) _onsets.Add((_samples - Block, rms));   // from the start of the block that jumped
     }
 
-    /// <summary>A cut for the model. While the model is behind in fast fire, a sound as loud as the shot it named just
-    /// before is the next shot, so a burst keeps flashing shot by shot.</summary>
+    /// <summary>A cut for the model. Within 300 ms of a shot, a sound at least 40 % as loud as it is the next shot of the
+    /// burst and flashes at once, without waiting for the model, so a burst flashes shot by shot.</summary>
     void Hand(float[] around, double rms)
     {
         long now = Environment.TickCount64;
@@ -229,7 +232,7 @@ public sealed class SoundFx : IDisposable
         lock (_cuts)
         {
             _cutsMade++;
-            lock (_shotGate) fast = _cuts.Count >= 2 && now - _gunTick < 250 && rms >= 0.5 * _gunRms;
+            lock (_shotGate) fast = now - _gunTick < 300 && rms >= 0.4 * _gunRms;
             if (!fast)
             {
                 if (_cuts.Count >= 4) { _cuts.Dequeue(); _late++; }
@@ -359,7 +362,7 @@ public sealed class SoundFx : IDisposable
     void Stats(Tensor<float> scores, int frames, double impact, double gun, double siren, double horn, long now)
     {
         _hops++;
-        lock (_shotGate) _loudestShot = Math.Max(0.05, _loudestShot * 0.97);  // the reference for shot strength forgets slowly (about 30 s)
+        lock (_shotGate) _loudestShot = Math.Max(0.05, _loudestShot * 0.9);  // the reference for shot strength forgets in about 5 s
         _sumImpact = Math.Max(_sumImpact, impact); _sumGun = Math.Max(_sumGun, gun); _sumSiren = Math.Max(_sumSiren, siren); _sumHorn = Math.Max(_sumHorn, horn);
         for (int i = 0; i < 521; i++)
         {
