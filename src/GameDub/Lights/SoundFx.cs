@@ -17,8 +17,9 @@ public enum SoundKind { Impact, Siren, Horn }
 /// <summary>
 /// Listens to what Windows plays (speakers or headphones alike: the loopback of the default output) and reports
 /// sound effects only: explosions, shots, crashes and breaking glass, sirens and alarms, horns. Speech and music
-/// are ignored. YAMNet (Google, AudioSet, 521 classes) names the sound twice a second on one CPU thread; a cheap
-/// loudness gate makes an impact flash at once when the last named sound already was an effect.
+/// are ignored. Two detectors: YAMNet (Google, AudioSet, 521 classes) names the sound twice a second on one CPU
+/// thread; and a loudness jump (a sudden burst 3x over the last 2 s, e.g. a crash over a racing game's engine,
+/// which YAMNet only ever calls "Vehicle", 16.11 test) is an impact unless YAMNet hears speech or music right now.
 /// </summary>
 public sealed class SoundFx : IDisposable
 {
@@ -48,6 +49,9 @@ public sealed class SoundFx : IDisposable
     int _blockN;
     long _lastEffectTick, _lastImpactTick, _lastSirenTick, _lastHornTick;
     double _lastImpactScore;
+    const double JumpRatio = 3.0;
+    long _talkTick;
+    double _maxRatio; int _jumps2, _jumps3, _jumps4, _jumpsTalk;
     // what was heard, for the log: strongest effect scores and the loudest top class over 10 s
     double _sumImpact, _sumSiren, _sumHorn; string _top = ""; double _topScore; int _hops; long _statTick;
     string[] _names = Array.Empty<string>();
@@ -136,12 +140,19 @@ public sealed class SoundFx : IDisposable
         double rms = Math.Sqrt(_block / _blockN);
         _block = 0; _blockN = 0;
         _peak = Math.Max(_peak * 0.9, rms);
-        bool onset = rms > 0.03 && rms > _slow * 4;
+        double ratio = rms / Math.Max(_slow, 1e-4);
         _slow = _slow * 0.99 + rms * 0.01; // ~2 s memory
-        if (!onset) return;
+        if (rms > 0.02)
+        {
+            _maxRatio = Math.Max(_maxRatio, ratio);
+            if (ratio >= 2) _jumps2++;
+            if (ratio >= 3) _jumps3++;
+            if (ratio >= 4) _jumps4++;
+        }
+        if (rms < 0.04 || ratio < JumpRatio) return;
         long now = Environment.TickCount64;
-        // The last named sound was an impact a moment ago: this burst is one too, flash without waiting for the model.
-        if (now - _lastImpactTick < 1500 && _lastImpactScore > 0.2) Fire(SoundKind.Impact, Math.Min(1, rms / 0.25), now);
+        if (now - _talkTick < 1500) { _jumpsTalk++; return; } // speech or music: not an effect
+        Fire(SoundKind.Impact, Math.Min(1, (ratio - JumpRatio) / 4 + 0.3), now);
     }
 
     void Classify()
@@ -178,14 +189,26 @@ public sealed class SoundFx : IDisposable
     {
         _hops++;
         _sumImpact = Math.Max(_sumImpact, impact); _sumSiren = Math.Max(_sumSiren, siren); _sumHorn = Math.Max(_sumHorn, horn);
+        string hopTop = ""; double hopScore = 0;
         for (int i = 0; i < 521; i++)
         {
             double v = 0; for (int f = 0; f < frames; f++) v = Math.Max(v, scores[f, i]);
             if (v > _topScore) { _topScore = v; _top = _names[i] ?? i.ToString(); }
+            if (v > hopScore) { hopScore = v; hopTop = _names[i] ?? ""; }
         }
+        if (hopScore > 0.3 && IsTalk(hopTop)) _talkTick = now;
         if (now - _statTick < 10_000) return;
-        Log.Write($"soundfx: {_hops} looks, max impact {_sumImpact:F2} siren {_sumSiren:F2} horn {_sumHorn:F2}, loudest «{_top}» {_topScore:F2}");
+        Log.Write($"soundfx: {_hops} looks, max impact {_sumImpact:F2} siren {_sumSiren:F2} horn {_sumHorn:F2}, loudest «{_top}» {_topScore:F2}; " +
+                  $"jumps x2 {_jumps2} x3 {_jumps3} x4 {_jumps4} (in talk {_jumpsTalk}), max x{_maxRatio:F1}");
         _statTick = now; _hops = 0; _sumImpact = _sumSiren = _sumHorn = _topScore = 0; _top = "";
+        _maxRatio = 0; _jumps2 = _jumps3 = _jumps4 = _jumpsTalk = 0;
+    }
+
+    static bool IsTalk(string name)
+    {
+        foreach (var w in new[] { "Speech", "speaking", "Conversation", "Narration", "Music", "Singing", "song", "Choir", "Rapping" })
+            if (name.Contains(w, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
     }
 
     void Fire(SoundKind kind, double strength, long now)
