@@ -58,7 +58,7 @@ public sealed class LightService : IDisposable
         lock (_gate)
         {
             _s = s;
-            bool wantSound = s.LightsOn && s.LightsSound && SoundFx.ModelPresent;
+            bool wantSound = s.LightsOn && (s.LightsSound || s.LightsRumble) && SoundFx.ModelPresent;
             if (wantSound && _sound == null)
             {
                 try { _sound = new SoundFx(); _sound.Effect += OnSound; _sound.FollowDefaultDevice(); }
@@ -70,6 +70,9 @@ public sealed class LightService : IDisposable
 
     void OnSound(SoundKind kind, double strength)
     {
+        AppSettings s; lock (_gate) s = _s;
+        if (s.LightsRumble && !_skip) Rumble.Pulse(kind, strength);
+        if (!s.LightsSound) return;
         lock (_gate)
         {
             _fx = kind; _fxStrength = strength; _fxStart = Environment.TickCount64;
@@ -199,6 +202,36 @@ public sealed class LightService : IDisposable
         _sound?.Dispose();
         _display.Dispose();
         _lights.Dispose();
+    }
+}
+
+/// <summary>
+/// A short rumble on the built-in gamepad for a sound effect: heavy and low for an impact, light for a horn,
+/// nothing for a siren. Any app may set XInput vibration; it stops by itself after the pulse.
+/// </summary>
+static class Rumble
+{
+    static int _gen;
+
+    public static void Pulse(SoundKind kind, double strength)
+    {
+        if (kind == SoundKind.Siren) return;
+        int pad = -1;
+        for (int i = 0; i < 4 && pad < 0; i++) if (Native.XInputGetState(i, out _) == 0) pad = i;
+        if (pad < 0) return;
+        double k = 0.4 + 0.6 * Math.Clamp(strength, 0, 1);
+        var v = kind == SoundKind.Impact
+            ? new Native.XINPUT_VIBRATION { wLeftMotorSpeed = (ushort)(50000 * k), wRightMotorSpeed = (ushort)(20000 * k) }
+            : new Native.XINPUT_VIBRATION { wLeftMotorSpeed = 0, wRightMotorSpeed = (ushort)(18000 * k) };
+        int ms = kind == SoundKind.Impact ? 180 : 120;
+        int gen = Interlocked.Increment(ref _gen);
+        Native.XInputSetState(pad, ref v);
+        _ = System.Threading.Tasks.Task.Delay(ms).ContinueWith(_ =>
+        {
+            if (gen != _gen) return; // a newer pulse owns the motors
+            var off = new Native.XINPUT_VIBRATION();
+            Native.XInputSetState(pad, ref off);
+        });
     }
 }
 
