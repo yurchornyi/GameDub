@@ -20,13 +20,30 @@ namespace GameDub.Lights;
 /// </summary>
 public sealed class LightService : IDisposable
 {
-    static readonly Rgb Blue = Rgb.Hex(0x2E7BFF), Green = Rgb.Hex(0x22E05A), Red = Rgb.Hex(0xFF2020), Orange = Rgb.Hex(0xFF7A10),
-        Amber = Rgb.Hex(0xFFB000), Flash = Rgb.Hex(0xFFE6C0), PoliceBlue = Rgb.Hex(0x1040FF);
+    // Colors as the stick LEDs show them: their green is far brighter than their red, so warm colors carry little
+    // green (a light orange #FFB068 showed as green on the ROG Xbox Ally X, 16.11).
+    static readonly Rgb Red = Rgb.Hex(0xFF0800), Orange = Rgb.Hex(0xFF2A00), Yellow = Rgb.Hex(0xFF6A00),
+        Green = Rgb.Hex(0x10FF30), Blue = Rgb.Hex(0x0020FF);
 
-    // The rings show a color only after it has held for a while: on the ROG Xbox Ally X a 0.5 s flash stayed
-    // invisible while 1.5 s colors showed (16.11). So every effect holds one color about a second, then fades
-    // in a few steps, and frames come 10 times a second, not 30.
-    const int FrameMs = 100, ImpactHold = 1200, HornHold = 900, ChargeHold = 1200, Fade = 600, FadeSteps = 3, SirenSwap = 600;
+    // Every effect rises softly, holds, then fades on a curve that looks even to the eye, 30 frames a second.
+    const int FrameMs = 33, SirenMs = 2400, SirenPeriod = 1200;
+    static readonly Pulse ImpactPulse = new(120, 600, 900), HornPulse = new(100, 350, 700), ChargePulse = new(150, 600, 900),
+        SirenEnvelope = new(150, SirenMs - 550, 400);
+
+    /// <summary>Brightness 0..1 of a one-shot effect over time: smooth rise, hold, then a squared fall
+    /// (LED light looks linear to the eye only on a curve; a straight fall seems to hang, then drop).</summary>
+    readonly record struct Pulse(int Rise, int Hold, int Fall)
+    {
+        public int Total => Rise + Hold + Fall;
+        public double At(long age)
+        {
+            if (age < 0) return 0;
+            if (age < Rise) { double x = age / (double)Rise; return x * x * (3 - 2 * x); }
+            if (age < Rise + Hold) return 1;
+            double f = 1 - (age - Rise - Hold) / (double)Fall;
+            return f <= 0 ? 0 : f * f;
+        }
+    }
 
     readonly StickLights _lights = new();
     readonly System.Threading.Timer _frame, _slow;
@@ -84,7 +101,7 @@ public sealed class LightService : IDisposable
         lock (_gate)
         {
             _fx = kind; _fxStrength = strength; _fxStart = Environment.TickCount64;
-            _fxMs = kind switch { SoundKind.Impact => ImpactHold + Fade, SoundKind.Siren => SirenSwap * 4, _ => HornHold + Fade };
+            _fxMs = kind switch { SoundKind.Impact => ImpactPulse.Total, SoundKind.Siren => SirenMs, _ => HornPulse.Total };
         }
     }
 
@@ -153,7 +170,7 @@ public sealed class LightService : IDisposable
         if (_demo == "download") _downloading = true;
     }
 
-    /// <summary>10 times a second: the color of each stick. Only changes reach the device.</summary>
+    /// <summary>30 times a second: the color of each stick. Only changes reach the device.</summary>
     void Frame()
     {
         try
@@ -194,14 +211,14 @@ public sealed class LightService : IDisposable
             switch (fx)
             {
                 case SoundKind.Impact:
-                    var c = HoldFade(Rgb.Mix(Flash, Orange, 0.5).Scale(k), idle, age, ImpactHold);
+                    var c = Rgb.Mix(idle, Orange.Scale(k), ImpactPulse.At(age));
                     return (c, c);
                 case SoundKind.Siren:
-                    bool swap = (age / SirenSwap) % 2 == 0;
-                    var a = Red.Scale(k); var b = PoliceBlue.Scale(k);
-                    return swap ? (a, b) : (b, a);
+                    // police lights: red on the left and blue on the right swell and ebb in turn
+                    double w = 0.5 - 0.5 * Math.Cos(2 * Math.PI * age / SirenPeriod), env = k * SirenEnvelope.At(age);
+                    return (Rgb.Mix(idle, Red, env * w * w), Rgb.Mix(idle, Blue, env * (1 - w) * (1 - w)));
                 default:
-                    var h = HoldFade(Amber.Scale(k), idle, age, HornHold);
+                    var h = Rgb.Mix(idle, Yellow.Scale(k), HornPulse.At(age));
                     return (h, h);
             }
         }
@@ -210,7 +227,7 @@ public sealed class LightService : IDisposable
         if (_batteryLow && cycle) { var c = Red.Scale(Breath(t, 3) * 0.8); return (c, c); }
         if (_hot && cycle) { var c = Orange.Scale(Breath(t, 3) * 0.7); return (c, c); }
         // 3. charger plugged in: one green flash
-        if (_chargeFlashStart > 0 && now - _chargeFlashStart < ChargeHold + Fade) { var c = HoldFade(Green, idle, now - _chargeFlashStart, ChargeHold); return (c, c); }
+        if (_chargeFlashStart > 0 && now - _chargeFlashStart < ChargePulse.Total) { var c = Rgb.Mix(idle, Green, ChargePulse.At(now - _chargeFlashStart)); return (c, c); }
         // 4. downloads: blue breathing while it runs, green when it is done (until he touches the console)
         if (_downloading) { var c = Blue.Scale(0.1 + 0.3 * Breath(t, 4)); return (c, c); }
         if (_downloaded) { var c = Green.Scale(0.35); return (c, c); }
@@ -218,15 +235,8 @@ public sealed class LightService : IDisposable
         return dark ? (Rgb.Off, Rgb.Off) : (idle, idle);
     }
 
-    static double Breath(double t, double period) => 0.5 - 0.5 * Math.Cos(2 * Math.PI * t / period);
-
-    /// <summary>The color for <paramref name="holdMs"/>, then back to the idle color in <see cref="FadeSteps"/> steps over <see cref="Fade"/>.</summary>
-    static Rgb HoldFade(Rgb c, Rgb idle, long age, int holdMs)
-    {
-        if (age < holdMs) return c;
-        double step = Math.Ceiling((age - holdMs) * (double)FadeSteps / Fade) / FadeSteps;
-        return Rgb.Mix(c, idle, step);
-    }
+    /// <summary>Slow breathing 0..1, squared so it swells and ebbs evenly to the eye.</summary>
+    static double Breath(double t, double period) { double b = 0.5 - 0.5 * Math.Cos(2 * Math.PI * t / period); return b * b; }
 
     static Rgb ReadAccent()
     {
