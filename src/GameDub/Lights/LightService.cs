@@ -131,6 +131,8 @@ public sealed class LightService : IDisposable
         bool fresh; lock (_gate) fresh = kind != SoundKind.Horn || now >= _hornUntil; // a long honk rumbles once, at its start
         if (fresh && s.LightsRumble && !_skip && _telemetry?.Live != true) Rumble.Pulse(kind, strength); // Forza rumbles itself
         if (!s.LightsSound) return;
+        // With the game's own data coming in (Forza), only it shows crashes: a crash sound may be an AI car's
+        if (kind == SoundKind.Impact && _telemetry?.Live == true) return;
         lock (_gate)
         {
             switch (kind)
@@ -287,7 +289,7 @@ public sealed class LightService : IDisposable
         lock (_gate) { fx = _fx; fxStart = _fxStart; fxMs = _fxMs; strength = _fxStrength; }
         if (fx != null && !dark && now - fxStart < fxMs)
         {
-            long age = now - fxStart; double k = 0.5 + 0.5 * strength;
+            long age = now - fxStart; double k = Felt(strength, 0.25);
             if (fx == SoundKind.Thunder) { var z = Rgb.Mix(idle, Lightning.Scale(Math.Max(k, 0.8)), Strike(age)); return (z, z); }
             var c = Rgb.Mix(idle, Orange.Scale(k), ImpactPulse(strength).At(age));
             return (c, c);
@@ -347,7 +349,8 @@ public sealed class LightService : IDisposable
     /// twice): "shift up" near the rev limit with the throttle down, blue double blinks; else the brake pedal. Without
     /// telemetry: the left trigger (read in the background through Raw Input, <see cref="PadInput"/>), but only while
     /// an engine is heard, so aiming in a shooter does not light.
-    /// Red as hard as the brake is pressed.
+    /// Red as hard as the brake is pressed, on a curve the eye reads as even: a light touch glows faintly, a full press
+    /// is full red (a straight 0.3..1 looked the same at any pressure on the sticks, 16.11).
     /// </summary>
     Rgb? RaceLight(long now)
     {
@@ -370,8 +373,14 @@ public sealed class LightService : IDisposable
             long p = now % ShiftPeriod;
             return Blue.Scale(Math.Max(ShiftBlink.At(p), ShiftBlink.At(p - ShiftGap)));
         }
-        return brake > 0.08 ? Red.Scale(0.3 + 0.7 * brake) : null;
+        return brake > 0.08 ? Red.Scale(Felt(brake, 0.08)) : null;
     }
+
+    /// <summary>
+    /// LED output for a share 0..1 that the eye should see as that share: the eye reads light roughly as its square root,
+    /// so the output is the square, over a floor that still shows. Screen brightness and Armoury's LED level scale it after.
+    /// </summary>
+    static double Felt(double share, double floor) { double x = Math.Clamp(share, 0, 1); return floor + (1 - floor) * x * x; }
 
     /// <summary>Slow breathing 0..1, squared so it swells and ebbs evenly to the eye.</summary>
     static double Breath(double t, double period) { double b = 0.5 - 0.5 * Math.Cos(2 * Math.PI * t / period); return b * b; }
