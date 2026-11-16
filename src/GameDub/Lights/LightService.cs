@@ -17,7 +17,8 @@ namespace GameDub.Lights;
 /// Games listed in <see cref="AppSettings.LightsSkipGames"/>, and any game that takes the lamps itself through
 /// Windows Dynamic Lighting, are left alone, unless <see cref="AppSettings.LightsOverGames"/> keeps them ours.
 /// Dark screen: lights off, except a running download.
-/// The console on a TV (an external display active): lights, rumble and listening off, the sticks are out of sight.
+/// The console on a TV (an external display active): lights and listening off, the sticks are out of sight.
+/// No rumble of its own: games rumble themselves, and a second one on top was a bother (owner, 16.11).
 /// Racing: brake lights and, with Forza's telemetry, a shift light and crashes. The sticks are as bright as the screen.
 /// Switched off in the settings, the tray disposes this, and Windows' own lighting effect comes back.
 /// </summary>
@@ -35,7 +36,8 @@ public sealed class LightService : IDisposable
     // a lub-dub (heartbeat), red and blue in turn (siren), slow breathing (states).
     const int FrameMs = 33, SirenPeriod = 800, ShiftPeriod = 500, ShiftGap = 180, HeartPeriod = 1000, HeartDub = 250, ThunderMs = 700;
     const int HeardHold = 700; // a sound heard again within this keeps its light on: the model looks every 480 ms
-    static readonly Pulse ChargePulse = new(150, 600, 900), HeartBeat = new(60, 60, 220), ShiftBlink = new(20, 60, 80);
+    static readonly Pulse ChargePulse = new(150, 600, 900), HeartBeat = new(60, 60, 220), ShiftBlink = new(20, 60, 80),
+        ShotPulse = new(10, 30, 150); // one shot: a quick orange blink, so a burst reads as separate shots
     /// <summary>An impact by its strength 0..1: 0.4 s and dim for a touch, 1.6 s and bright for a heavy crash.</summary>
     static Pulse ImpactPulse(double s) => new(60 + (int)(60 * s), 80 + (int)(520 * s), 260 + (int)(640 * s));
 
@@ -68,10 +70,11 @@ public sealed class LightService : IDisposable
 
     // one-shot effect
     long _fxStart; int _fxMs; SoundKind? _fx; double _fxStrength;
+    long _shotStart; double _shotStrength; // the last shot: its own short pulse, over an impact's longer one
     // a heartbeat, a siren or a horn heard in the game: lit from its start until its until, moved on while it is heard
     long _heartStart, _heartUntil, _sirenStart, _sirenUntil, _hornStart, _hornUntil; double _hornStrength;
     // states
-    volatile bool _downloading, _downloaded, _batteryLow, _hot, _skip, _charging, _docked;
+    volatile bool _downloading, _downloaded, _batteryLow, _hot, _skip, _charging, _docked, _racingGame;
     int _dockLogged = -1;
     bool _skipShown;
     long _chargeFlashStart = -1;
@@ -98,7 +101,7 @@ public sealed class LightService : IDisposable
         lock (_gate)
         {
             _s = s;
-            bool wantSound = s.LightsOn && (s.LightsSound || s.LightsRumble) && SoundFx.ModelPresent;
+            bool wantSound = s.LightsOn && s.LightsSound && SoundFx.ModelPresent;
             if (wantSound && _sound == null)
             {
                 try { _sound = new SoundFx(); _sound.Effect += OnSound; _sound.FollowDefaultDevice(); }
@@ -116,7 +119,7 @@ public sealed class LightService : IDisposable
         }
     }
 
-    /// <summary>A crash in Forza's telemetry: the impact light. No rumble: the game rumbles itself.</summary>
+    /// <summary>A crash in Forza's telemetry: the impact light.</summary>
     void OnCrash(double strength)
     {
         if (_docked) return;
@@ -128,8 +131,6 @@ public sealed class LightService : IDisposable
         if (_docked) return;                  // on a TV: the sticks are out of sight and the pad in hand is another one
         AppSettings s; lock (_gate) s = _s;
         long now = Environment.TickCount64;
-        bool fresh; lock (_gate) fresh = kind != SoundKind.Horn || now >= _hornUntil; // a long honk rumbles once, at its start
-        if (fresh && s.LightsRumble && !_skip && _telemetry?.Live != true) Rumble.Pulse(kind, strength); // Forza rumbles itself
         if (!s.LightsSound) return;
         // With the game's own data coming in (Forza), only it shows crashes: a crash sound may be an AI car's
         if (kind == SoundKind.Impact && _telemetry?.Live == true) return;
@@ -137,6 +138,9 @@ public sealed class LightService : IDisposable
         {
             switch (kind)
             {
+                case SoundKind.Shot:
+                    _shotStart = now; _shotStrength = strength;
+                    return;
                 case SoundKind.Heartbeat:
                     // beats on while the game's heart is heard, then stops at the end of a beat
                     if (now >= _heartUntil) _heartStart = now;
@@ -167,13 +171,16 @@ public sealed class LightService : IDisposable
             long now = Environment.TickCount64;
             _sound?.FollowDefaultDevice();
             _docked = Dock.OnTv();
-            if ((_docked ? 1 : 0) != _dockLogged) { _dockLogged = _docked ? 1 : 0; Log.Write(_docked ? "lights: console on a TV, lights and rumble off" : "lights: handheld"); }
+            if ((_docked ? 1 : 0) != _dockLogged) { _dockLogged = _docked ? 1 : 0; Log.Write(_docked ? "lights: console on a TV, lights off" : "lights: handheld"); }
             if (_sound is { } snd) snd.Paused = _docked || _display.Off;
             long padAt = _pad.ActiveTick; bool padTouched = padAt != _padSeen; _padSeen = padAt;
             if (Input.Touched(ref _lastInputTick) || padTouched) _downloaded = false;
             if (now % 60000 < 1000) _accent = ReadAccent();
-            // the pad is read only while a race may be on (an engine heard lately, no telemetry) or a press is awaited
-            bool race = s.LightsRacing && _telemetry?.Live != true && _sound?.EngineHeardWithin(30_000) == true;
+            // the brake: only in a racing game (its Steam genre), and the pad is read only while a race may be on (an engine
+            // heard lately, no telemetry) or a press is awaited
+            string? front = ForegroundPath();
+            _racingGame = s.LightsRacing && RacingGames.IsRacing(front);
+            bool race = _racingGame && _telemetry?.Live != true && _sound?.EngineHeardWithin(30_000) == true;
             _pad.Listen(!_docked && (race || _downloaded));
             if (now - _brakeStatTick > 60_000)
             {
@@ -186,7 +193,8 @@ public sealed class LightService : IDisposable
                 _screenTick = now;
                 if (Backlight.Percent() is int b && b > 0) _screen = Math.Clamp(b / 100.0, 0.1, 1);
             }
-            _skip = !s.LightsOverGames && s.LightsSkipGames.Count > 0 && ForegroundExe() is string exe && s.LightsSkipGames.Any(g => exe.Equals(g, StringComparison.OrdinalIgnoreCase));
+            _skip = !s.LightsOverGames && s.LightsSkipGames.Count > 0 && front != null &&
+                s.LightsSkipGames.Any(g => Path.GetFileNameWithoutExtension(front).Equals(g, StringComparison.OrdinalIgnoreCase));
 
             // download: received bytes over all live adapters
             long rx = 0;
@@ -287,11 +295,19 @@ public sealed class LightService : IDisposable
         // 1. sound effect: over everything
         SoundKind? fx; long fxStart; int fxMs; double strength;
         lock (_gate) { fx = _fx; fxStart = _fxStart; fxMs = _fxMs; strength = _fxStrength; }
-        if (fx != null && !dark && now - fxStart < fxMs)
+        long sAge; double sk; lock (_gate) { sAge = now - _shotStart; sk = _shotStrength; }
+        double shot = !dark && sAge < ShotPulse.Total ? Felt(sk, 0.15) * ShotPulse.At(sAge) : 0;
+        bool fxOn = fx != null && !dark && now - fxStart < fxMs;
+        if (fxOn && fx == SoundKind.Thunder)
         {
-            long age = now - fxStart; double k = Felt(strength, 0.25);
-            if (fx == SoundKind.Thunder) { var z = Rgb.Mix(idle, Lightning.Scale(Math.Max(k, 0.8)), Strike(age)); return (z, z); }
-            var c = Rgb.Mix(idle, Orange.Scale(k), ImpactPulse(strength).At(age));
+            var z = Rgb.Mix(idle, Lightning.Scale(Math.Max(Felt(strength, 0.25), 0.8)), Strike(now - fxStart));
+            return (z, z);
+        }
+        if (fxOn || shot > 0)
+        {
+            // an impact's pulse and a shot's blink, both orange: the brighter one shows
+            double hit = fxOn ? Felt(strength, 0.25) * ImpactPulse(strength).At(now - fxStart) : 0;
+            var c = Rgb.Mix(idle, Orange, Math.Max(hit, shot));
             return (c, c);
         }
         // 2. a siren or an alarm in the game: police lights, red on the left and blue on the right swell in turn
@@ -347,8 +363,9 @@ public sealed class LightService : IDisposable
     /// <summary>
     /// Racing lights. With Forza's telemetry coming in, only it counts (the trigger is not looked at, so nothing lights
     /// twice): "shift up" near the rev limit with the throttle down, blue double blinks; else the brake pedal. Without
-    /// telemetry: the left trigger (read in the background through Raw Input, <see cref="PadInput"/>), but only while
-    /// an engine is heard, so aiming in a shooter does not light.
+    /// telemetry: the left trigger (read in the background through Raw Input, <see cref="PadInput"/>), but only in a
+    /// racing game (<see cref="RacingGames"/>, its Steam genre) while an engine is heard, so aiming in a shooter never
+    /// lights, even with a helicopter overhead.
     /// Red as hard as the brake is pressed, on a curve the eye reads as even: a light touch glows faintly, a full press
     /// is full red (a straight 0.3..1 looked the same at any pressure on the sticks, 16.11).
     /// </summary>
@@ -365,7 +382,7 @@ public sealed class LightService : IDisposable
         {
             double held = _pad.LeftTrigger;
             if (held > 0.08) _brakeHeldFrames++;
-            if (_sound?.EngineHeardWithin(8000) == true) brake = held; // the music may drown the engine for a few seconds
+            if (_racingGame && _sound?.EngineHeardWithin(8000) == true) brake = held; // the music may drown the engine for a few seconds
             if (brake > 0.08) _brakeLitFrames++;
         }
         if (shift)
@@ -395,13 +412,12 @@ public sealed class LightService : IDisposable
         catch { return Rgb.Hex(0x0078D4); }
     }
 
-    static string? ForegroundExe()
+    static string? ForegroundPath()
     {
         var h = Native.GetForegroundWindow();
         if (h == IntPtr.Zero) return null;
         Native.GetWindowThreadProcessId(h, out uint pid);
-        var path = Native.GetProcessPath((int)pid);
-        return path == null ? null : Path.GetFileNameWithoutExtension(path);
+        return Native.GetProcessPath((int)pid);
     }
 
     public void Dispose()
@@ -412,36 +428,6 @@ public sealed class LightService : IDisposable
         _pad.Dispose();
         _display.Dispose();
         _lights.Dispose();
-    }
-}
-
-/// <summary>
-/// A short rumble on the built-in gamepad for a sound effect: heavy and low for an impact, light for a horn,
-/// nothing for the rest (a siren, a heartbeat, thunder). Any app may set XInput vibration; it stops by itself after the pulse.
-/// </summary>
-static class Rumble
-{
-    static int _gen;
-
-    public static void Pulse(SoundKind kind, double strength)
-    {
-        if (kind is not (SoundKind.Impact or SoundKind.Horn)) return;
-        int pad = -1;
-        for (int i = 0; i < 4 && pad < 0; i++) if (Native.XInputGetState(i, out _) == 0) pad = i;
-        if (pad < 0) return;
-        double k = 0.4 + 0.6 * Math.Clamp(strength, 0, 1);
-        var v = kind == SoundKind.Impact
-            ? new Native.XINPUT_VIBRATION { wLeftMotorSpeed = (ushort)(50000 * k), wRightMotorSpeed = (ushort)(20000 * k) }
-            : new Native.XINPUT_VIBRATION { wLeftMotorSpeed = 0, wRightMotorSpeed = (ushort)(18000 * k) };
-        int ms = kind == SoundKind.Impact ? 180 : 120;
-        int gen = Interlocked.Increment(ref _gen);
-        Native.XInputSetState(pad, ref v);
-        _ = System.Threading.Tasks.Task.Delay(ms).ContinueWith(_ =>
-        {
-            if (gen != _gen) return; // a newer pulse owns the motors
-            var off = new Native.XINPUT_VIBRATION();
-            Native.XInputSetState(pad, ref off);
-        });
     }
 }
 
