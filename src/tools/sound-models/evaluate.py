@@ -8,6 +8,8 @@ Sounds (downloaded here, never stored in the repository):
 - AudioSet evaluation set (Google, CC BY 4.0; via the Hugging Face dataset agkphysics/AudioSet): gunfire, explosions,
   breaking, sirens, horns, car crashes (clips with "Smash, crash" and a vehicle), and what must not flash: doors,
   footsteps, vehicles, speech, music, anything else.
+- AudioSet unbalanced training set: car crashes ("Smash, crash" with a vehicle; the evaluation set has none), when
+  the dataset server can filter it.
 - ESC-50 (K. Piczak, CC BY-NC 3.0): 40 kinds of everyday sounds, 20 clips each.
 - SFXMint (CC0, sound effects made for games): vehicles, doors, footsteps, hits and more.
 
@@ -54,16 +56,27 @@ OK_GROUPS = {"shot": ["as: gunfire"], "blast": ["as: explosion", "as: smash, bre
 
 def get(url, tries=6, **kw):
     for i in range(tries):
+        wait = min(60, 2 ** i)
         try:
             r = requests.get(url, headers=UA, timeout=120, **kw)
             if r.status_code == 429 or r.status_code >= 500:
+                # too many requests: wait as long as the server asks (Hugging Face counts them per 5 minutes)
+                ra = r.headers.get("Retry-After", "")
+                if ra.isdigit():
+                    wait = min(300, int(ra) + 1)
+                elif r.status_code == 429:
+                    wait = 60
                 raise IOError(f"HTTP {r.status_code}")
-            r.raise_for_status()
+            if r.status_code >= 400:
+                # a wrong request does not get right by asking again
+                raise ValueError(f"HTTP {r.status_code}: {r.text[:200]}")
             return r
+        except ValueError:
+            raise
         except Exception:
             if i == tries - 1:
                 raise
-            time.sleep(min(60, 2 ** i))
+            time.sleep(wait)
 
 
 # ---------------------------------------------------------------- data
@@ -183,9 +196,9 @@ def fetch_esc50(root):
     return [(os.path.join(d, r["filename"]), "esc: " + r["category"]) for r in csv.DictReader(open(os.path.join(d, "meta.csv")))]
 
 
-SFX_CAP = {"Vehicle Sounds": 1000, "Door Sounds": 50, "Footsteps": 50, "Impacts & Hits": 80, "Glass & Ceramic": 30,
-           "Mechanical Sounds": 30, "Human Sounds": 30, "UI & Notification Sounds": 30, "Fire & Electricity": 20,
-           "Household & Kitchen": 20, "Crowd Sounds": 20}
+SFX_CAP = {"car collision": 200, "Vehicle Sounds": 60, "Door Sounds": 50, "Footsteps": 50, "Impacts & Hits": 80,
+           "Glass & Ceramic": 30, "Mechanical Sounds": 30, "Human Sounds": 20, "UI & Notification Sounds": 20,
+           "Fire & Electricity": 20, "Household & Kitchen": 20, "Crowd Sounds": 20}
 
 
 def sfx_group(r):
@@ -195,36 +208,72 @@ def sfx_group(r):
 
 
 def fetch_sfx(root):
+    """SFXMint: every car collision and a few of each other kind. The selection is the same each run, so files a
+    run could not get (the server limits requests) are fetched by the next one."""
     d = os.path.join(root, "sfx")
     os.makedirs(d, exist_ok=True)
-    sel_path = os.path.join(d, "selection.json")
-    if os.path.exists(sel_path):
-        sel = json.load(open(sel_path))
+    cat = os.path.join(d, "catalog.csv")
+    if not os.path.exists(cat):
+        open(cat, "w").write(get("https://huggingface.co/datasets/flreey/sfxmint-cc0-sound-effects/resolve/main/catalog.csv").text)
+    rows = list(csv.DictReader(open(cat)))
+    random.Random(7).shuffle(rows)
+    per, sel = {}, []
+    for r in rows:
+        g = sfx_group(r)
+        if per.get(g, 0) < SFX_CAP.get(g, 0):
+            per[g] = per.get(g, 0) + 1
+            sel.append({"file": r["id"] + ".mp3", "url": r["mp3_url"], "group": g})
+    print("sfx: chosen", per)
+
+    def dl(s_):
+        p = os.path.join(d, s_["file"])
+        if not os.path.exists(p):
+            try:
+                open(p, "wb").write(get(s_["url"], tries=8).content)
+            except Exception as e:
+                print("sfx: skip", s_["file"], e)
+                return None
+        return s_
+
+    with ThreadPoolExecutor(2) as ex:
+        got = [s_ for s_ in ex.map(dl, sel) if s_]
+    print(f"sfx: {len(got)} of {len(sel)} clips")
+    return [(os.path.join(d, s_["file"]), "sfx: " + s_["group"]) for s_ in got]
+
+
+def fetch_crashes(root):
+    """Car crashes from the 1.7 million AudioSet clips: "Smash, crash" heard with a vehicle. The evaluation set has
+    none, so they come from the unbalanced training set through the dataset server's filter; when the server cannot
+    filter, there are none (and the report says so)."""
+    d = os.path.join(root, "audioset-crash")
+    os.makedirs(d, exist_ok=True)
+    st_path = os.path.join(d, "selection.json")
+    if os.path.exists(st_path):
+        sel = json.load(open(st_path))
     else:
-        rows = list(csv.DictReader(io.StringIO(get(
-            "https://huggingface.co/datasets/flreey/sfxmint-cc0-sound-effects/resolve/main/catalog.csv").text)))
-        random.Random(7).shuffle(rows)
-        per, sel = {}, []
-        for r in rows:
-            c = r["category"]
-            if per.get(c, 0) < SFX_CAP.get(c, 0):
-                per[c] = per.get(c, 0) + 1
-                sel.append({"file": r["id"] + ".mp3", "url": r["mp3_url"], "group": sfx_group(r)})
-
-        def dl(s):
-            p = os.path.join(d, s["file"])
-            if not os.path.exists(p):
-                try:
-                    open(p, "wb").write(get(s["url"]).content)
-                except Exception as e:
-                    print("sfx: skip", s["file"], e)
-                    return None
-            return s
-
-        with ThreadPoolExecutor(4) as ex:
-            sel = [s for s in ex.map(dl, sel) if s]
-        json.dump(sel, open(sel_path, "w"))
-    return [(os.path.join(d, s["file"]), "sfx: " + s["group"]) for s in sel if os.path.exists(os.path.join(d, s["file"]))]
+        car = " OR ".join(f"\"human_labels\" LIKE '%{v}%'" for v in ("Car", "Vehicle", "Truck", "Motorcycle", "Race car"))
+        where = f"\"human_labels\" LIKE '%Smash, crash%' AND ({car})"
+        try:
+            j = get("https://datasets-server.huggingface.co/filter", tries=8,
+                    params={"dataset": "agkphysics/AudioSet", "config": "unbalanced", "split": "train", "where": where,
+                            "offset": 0, "length": 100}).json()
+        except Exception as e:
+            print(f"audioset crashes: the server could not filter ({e})")
+            return []
+        sel = []
+        for r in j.get("rows", []):
+            x = r["row"]
+            if as_group(x["human_labels"]) != "car crash":
+                continue
+            p = os.path.join(d, x["video_id"] + ".flac")
+            try:
+                open(p, "wb").write(get(x["audio"][0]["src"]).content)
+                sel.append({"file": x["video_id"] + ".flac", "labels": x["human_labels"]})
+            except Exception as e:
+                print("audioset crashes: skip", x["video_id"], e)
+        print(f"audioset crashes: {len(sel)} of {j.get('num_rows_total')} found")
+        json.dump(sel, open(st_path, "w"))
+    return [(os.path.join(d, s_["file"]), "as: car crash") for s_ in sel]
 
 
 # ---------------------------------------------------------------- the app's audio path
@@ -313,7 +362,8 @@ def init_worker(models_dir, yam_dir, clap_keys):
         if os.path.exists(p):
             M[m] = sess(p)
             M["eat_models"].append(m)
-    M["clap"] = {k: sess(os.path.join(models_dir, f"{k}.onnx")) for k in clap_keys}
+    # the int8 files, the ones the app would take (worst cosine to float 0.997)
+    M["clap"] = {k: sess(os.path.join(models_dir, f"{k}.int8.onnx")) for k in clap_keys}
     prompts = list(csv.DictReader(open(os.path.join(models_dir, "clap_prompts.csv"))))
     M["crash_idx"] = [int(p["index"]) for p in prompts if p["kind"] == "crash"]
     M["ms"] = {}
@@ -401,18 +451,11 @@ def run_clip(job):
                     j[m] = summary(m, eat(m, c))
                 judged.append(j)
         if pipe == "eat" and do_clap and M["clap"]:
-            # CLAP for the three most hit-like onsets: cut 1 s ending 60 ms or 250 ms after the onset, or 0.5 s
+            # CLAP for the three most hit-like onsets: 1 s ending 250 ms after the onset, as the app cuts it
             for j in sorted(judged, key=lambda j: -j["mn10"]["hint"])[:3]:
-                cl = {}
-                for post_ms, secs in [(60, 1.0), (250, 1.0), (250, 0.5)]:
-                    c = cut(xs, j["at"] + rate * post_ms // 1000, int(rate * secs))
-                    if c is None:
-                        continue
-                    for k in M["clap"]:
-                        if k != "clap-tiny" and (post_ms, secs) != (250, 1.0):
-                            continue
-                        cl[f"{k}@{post_ms}/{secs}"] = clap(k, to48(c))
-                j["clap"] = cl
+                c = cut(xs, j["at"] + rate * 250 // 1000, rate)
+                if c is not None:
+                    j["clap"] = {f"{k}@250/1.0": clap(k, to48(c)) for k in M["clap"]}
         rec["pipes"][pipe] = {"looks": looks, "onsets": judged}
     rec["ms"] = {k: list(v) for k, v in M["ms"].items()}
     rec["pid"] = os.getpid()
@@ -605,6 +648,39 @@ def report(recs, export, out):
     open(out, "w").write("\n".join(L) + "\n")
 
 
+DOG = {"Dog", "Bark", "Bow-wow", "Yip", "Growling", "Howl", "Whimper (dog)", "Animal", "Domestic animals, pets"}
+
+
+def self_check(models_dir, yam_dir, esc):
+    """Before three thousand clips: each model must name a real sound, a dog barking from ESC-50, in its loudest
+    second, fed exactly as the clips are. (16.11.2026 a run scored 1.0 for every class of every clip with EfficientAT,
+    while its export matched PyTorch on noise.)"""
+    init_worker(models_dir, yam_dir, [])
+    path = next(p for p, g in esc if g == "esc: dog")
+    x, sr = sf.read(path, dtype="float32", always_2d=True)
+    x = x.mean(1)
+    x16, x32 = box(x, sr, 16000), box(x, sr, 32000)
+    n = len(x32) // 320
+    rms = np.sqrt((x32[:n * 320].reshape(n, 320) ** 2).mean(1))
+    e = min(len(x32), max(32000, (int(np.argmax(rms)) + 50) * 320))
+    c32, c16 = x32[e - 32000:e], x16[e // 2 - 15600:e // 2]
+    top = lambda v, ns: ", ".join(f"{ns[i]} {v[i]:.2f}" for i in np.argsort(-v)[:5])
+    en = M["names"]["eat"]
+    v = eat("mn10", c32)
+    so = ort.SessionOptions()  # the export's own way: default options
+    v_default = ort.InferenceSession(os.path.join(models_dir, "efficientat-mn10_as.onnx"), so,
+                                     providers=["CPUExecutionProvider"]).run(None, {"wave": c32[None].copy()})[0][0]
+    noise = (np.random.default_rng(0).standard_normal(32000) * 0.1).astype(np.float32)
+    print(f"self-check: {os.path.basename(path)}, {sr} Hz, cut {c32.dtype} {c32.shape} rms {float(np.sqrt((c32 ** 2).mean())):.3f} "
+          f"peak {float(np.abs(c32).max()):.3f}")
+    print(f"  yamnet: {top(yamnet(c16), M['names']['yamnet'])}")
+    print(f"  mn10: {top(v, en)}; mean {float(v.mean()):.3f}; output shape {M['mn10'].get_outputs()[0].shape}")
+    print(f"  mn10, default session: {top(v_default, en)}")
+    print(f"  mn10, noise: {top(eat('mn10', noise), en)}")
+    if en[int(np.argmax(v))] not in DOG:
+        raise SystemExit("self-check: EfficientAT does not hear the dog, the scores would mean nothing")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", required=True)
@@ -615,9 +691,10 @@ def main():
     ap.add_argument("--clips", default="work/test-clips")
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
     a = ap.parse_args()
-    clips = fetch_audioset(a.data) + fetch_esc50(a.data) + fetch_sfx(a.data)
+    esc = fetch_esc50(a.data)
+    self_check(a.models, a.yamnet, esc)
+    clips = fetch_audioset(a.data) + fetch_crashes(a.data) + esc + fetch_sfx(a.data)
     print(f"{len(clips)} clips")
-    open(os.path.join(a.data, "complete"), "w").close()  # all sounds are here: the workflow stops saving them
     per, jobs = {}, []
     for p, g in clips:
         do = bool(CLAP_GROUPS.match(g)) and per.get(g, 0) < CLAP_CAP.get(g, 10**9)

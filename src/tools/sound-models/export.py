@@ -92,6 +92,21 @@ def real_clip(rate):
     return x.astype(np.float32)
 
 
+DOG_WAV = "https://raw.githubusercontent.com/karolpiczak/ESC-50/master/audio/1-100032-A-0.wav"
+DOG = {"Dog", "Bark", "Bow-wow", "Yip", "Growling", "Howl", "Whimper (dog)", "Animal", "Domestic animals, pets"}
+
+
+def dog_barking(rate):
+    """A dog barking (ESC-50, K. Piczak, CC BY-NC 3.0; downloaded, never stored): a real sound the model must name.
+    Matching PyTorch on noise is not enough: both can be wrong the same way."""
+    import io
+    import requests
+    import soundfile as sf
+    import torchaudio.functional as AF
+    x, sr = sf.read(io.BytesIO(requests.get(DOG_WAV, timeout=60).content), dtype="float32", always_2d=True)
+    return AF.resample(torch.from_numpy(x.mean(1)), sr, rate).numpy().astype(np.float32)
+
+
 def export_eat(name, out, src, report):
     src = os.path.abspath(src)
     cwd = os.getcwd()
@@ -130,10 +145,25 @@ def export_eat(name, out, src, report):
             ref = model(x).numpy()
         got = sess.run(None, {"wave": x.numpy()})[0]
         worst = max(worst, float(np.abs(ref - got).max()))
-    ok = worst < 1e-3
-    print(f"{name}: onnx vs pytorch, worst difference {worst:.2e} {'OK' if ok else 'FAIL'}")
+    labels = [r[2] for r in csv.reader(open(os.path.join(src, "metadata", "class_labels_indices.csv")))][1:]
+    top = lambda p: ", ".join(f"{labels[i]} {p[i]:.2f}" for i in np.argsort(-p)[:5])
+    dog = dog_barking(32000)
+    with torch.no_grad():
+        spec = mel(torch.from_numpy(dog)[None])
+        p_torch = model(torch.from_numpy(dog)[None]).numpy()[0]
+        p_own, _ = net(spec.unsqueeze(0))  # EfficientAT's own inference.py, step by step
+        p_own = torch.sigmoid(p_own.float()).squeeze().numpy()
+    p_onnx = sess.run(None, {"wave": dog[None]})[0][0]
+    print(f"{name}: a dog barking, mel {float(spec.min()):.2f}..{float(spec.max()):.2f} mean {float(spec.mean()):.2f}")
+    print(f"{name}:   EfficientAT's own way: {top(p_own)}")
+    print(f"{name}:   pytorch wrapper: {top(p_torch)}")
+    print(f"{name}:   onnx: {top(p_onnx)}; mean {float(p_onnx.mean()):.3f}")
+    heard = labels[int(np.argmax(p_onnx))] in DOG
+    ok = worst < 1e-3 and heard
+    print(f"{name}: onnx vs pytorch, worst difference {worst:.2e}; hears the dog: {heard}; {'OK' if ok else 'FAIL'}")
     report[f"efficientat-{name}"] = {
         "file": os.path.basename(path), "mb": round(os.path.getsize(path) / 2**20, 1), "worst_diff": worst, "ok": ok,
+        "dog": top(p_onnx),
         "ms_1s_1thread": bench(path, {"wave": np.zeros((1, 32000), np.float32) + 0.01}, 1),
         "ms_1s_2threads": bench(path, {"wave": np.zeros((1, 32000), np.float32) + 0.01}, 2),
     }

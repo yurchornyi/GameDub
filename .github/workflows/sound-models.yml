@@ -33,18 +33,17 @@ jobs:
           mkdir -p work/yamnet
           curl -sfL https://huggingface.co/zeropointnine/yamnet-onnx/resolve/main/yamnet.onnx -o work/yamnet/yamnet.onnx
           curl -sfL https://huggingface.co/zeropointnine/yamnet-onnx/resolve/main/yamnet_class_map.csv -o work/yamnet/yamnet_class_map.csv
-      # the sounds take ~30 min to download: each run keeps what it got, and the next one goes on from the newest
+      # the sounds take long to download (the servers limit requests): each run keeps what it has, and the next one
+      # goes on from the newest
       - uses: actions/cache/restore@v4
         with:
           path: work/data
           key: sound-eval-data-v2-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: sound-eval-data-v2-
-      - id: data
-        run: echo "complete=$([ -f work/data/complete ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
       - name: Evaluate
         run: python src/tools/sound-models/evaluate.py --models work/models --yamnet work/yamnet --data work/data --report work/report.md --scores work/scores.json.gz
       - uses: actions/cache/save@v4
-        if: always() && steps.data.outputs.complete != 'yes'
+        if: always()
         with:
           path: work/data
           key: sound-eval-data-v2-${{ github.run_id }}-${{ github.run_attempt }}
