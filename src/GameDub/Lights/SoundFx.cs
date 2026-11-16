@@ -40,9 +40,12 @@ public sealed class SoundFx : IDisposable
     const int PostSamples = Rate * 60 / 1000; // a sudden sound is judged 60 ms after its onset
     const int OnsetGap = Rate * 60 / 1000;  // a fast gun fires 10-15 times a second
     const int StaleMs = 250;                // a cut the model reaches later than this is dropped: late is worse than missed
-    // Real hits only: "Slam", "Thump, thud" and "Burst, pop" also name doors, footsteps and bubbles
-    static readonly string[] ImpactNames = { "Explosion", "Fireworks", "Firecracker", "Eruption", "Boom", "Bang", "Smash, crash",
+    // Real hits only: "Slam", "Thump, thud" and "Burst, pop" also name doors, footsteps and bubbles; "Bang" too (a car
+    // door in GTA 5 flashed as a blast, 16.11)
+    static readonly string[] ImpactNames = { "Explosion", "Fireworks", "Firecracker", "Eruption", "Boom", "Smash, crash",
         "Breaking", "Shatter" };
+    // doors and knocks: when they sound stronger than a blast, it was a door
+    static readonly string[] DoorNames = { "Door", "Sliding door", "Slam", "Knock", "Tap", "Thump, thud", "Bang" };
     static readonly string[] GunNames = { "Gunshot, gunfire", "Machine gun", "Fusillade", "Artillery fire", "Cap gun" };
     static readonly string[] FootNames = { "Walk, footsteps", "Run", "Shuffle" };
     const double GunScore = 0.2, ShotLoudness = 0.35, ImpactScore = 0.35, SirenScore = 0.3, SirenKeep = 0.25;
@@ -59,7 +62,7 @@ public sealed class SoundFx : IDisposable
 
     readonly InferenceSession _model;
     readonly string _input, _output;
-    readonly int[] _impact, _gun, _foot, _siren, _horn, _engine;
+    readonly int[] _impact, _gun, _foot, _door, _siren, _horn, _engine;
     readonly float[] _ring = new float[Rate * 2];
     readonly object _gate = new();
     int _write;
@@ -84,7 +87,7 @@ public sealed class SoundFx : IDisposable
     // sudden sounds over a minute, for the log
     int _cutsMade, _judged, _late, _fast, _shots, _impacts; double _clipGun, _clipImpact, _judgeMs;
     readonly Dictionary<string, int> _clipTops = new();
-    long _lastEffectTick, _sirenOnUntil; bool _sirenLookPrev;
+    long _lastEffectTick, _sirenOnUntil, _shotLogTick; int _shotsSinceLog; bool _sirenLookPrev;
     readonly long[] _lastHeard = new long[Enum.GetValues<SoundKind>().Length];
     // what was heard, for the log: strongest effect scores and the loudest top class over a minute
     double _sumImpact, _sumGun, _sumSiren, _sumHorn; string _top = ""; double _topScore; int _hops; long _statTick;
@@ -107,7 +110,7 @@ public sealed class SoundFx : IDisposable
         var names = File.ReadAllLines(Path.Combine(ModelDir, "yamnet_class_map.csv")).Skip(1)
             .Select(l => l.Split(',', 3)).Where(p => p.Length == 3).Select(p => (i: int.Parse(p[0]), name: p[2].Trim().Trim('"'))).ToList();
         int[] Find(string[] wanted) => names.Where(n => wanted.Contains(n.name)).Select(n => n.i).ToArray();
-        _impact = Find(ImpactNames); _gun = Find(GunNames); _foot = Find(FootNames); _siren = Find(SirenNames); _horn = Find(HornNames); _engine = Find(EngineNames);
+        _impact = Find(ImpactNames); _gun = Find(GunNames); _foot = Find(FootNames); _door = Find(DoorNames); _siren = Find(SirenNames); _horn = Find(HornNames); _engine = Find(EngineNames);
         _names = new string[521];
         foreach (var n in names) if (n.i >= 0 && n.i < 521) _names[n.i] = n.name;
 
@@ -263,12 +266,12 @@ public sealed class SoundFx : IDisposable
     {
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         var h = Scores(around);
-        double gun = h.Max(_gun), impact = h.Max(_impact), foot = h.Max(_foot);
+        double gun = h.Max(_gun), impact = h.Max(_impact), foot = h.Max(_foot), door = h.Max(_door);
         int top = h.Top();
         long now = Environment.TickCount64;
         double loudest; lock (_shotGate) loudest = _loudestShot;
         bool shot = gun >= GunScore && gun >= impact && gun > foot && rms >= ShotLoudness * loudest;
-        bool blast = !shot && impact >= ImpactScore && impact > gun && impact > foot;
+        bool blast = !shot && impact >= ImpactScore && impact > gun && impact > foot && impact > door;
         lock (_clipTops)
         {
             _judged++; _judgeMs += System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
@@ -276,8 +279,14 @@ public sealed class SoundFx : IDisposable
             string name = _names[top] ?? top.ToString();
             _clipTops[name] = _clipTops.TryGetValue(name, out int n) ? n + 1 : 1;
         }
-        if (shot) Shoot(rms, now);
-        else if (blast) { _impacts++; Fire(SoundKind.Impact, impact, ImpactScore, now); }
+        if (shot)
+        {
+            // a burst is many shots: the log names the first of each and how many followed
+            if (now - _shotLogTick > 2000) { Log.Write($"soundfx: Shot («{_names[top]}», {_shotsSinceLog} more before)"); _shotLogTick = now; _shotsSinceLog = 0; }
+            else _shotsSinceLog++;
+            Shoot(rms, now);
+        }
+        else if (blast) { _impacts++; Fire(SoundKind.Impact, impact, ImpactScore, now, _names[top]); }
     }
 
     /// <summary>The model's scores over one window, each class at its strongest frame.</summary>
@@ -372,7 +381,7 @@ public sealed class SoundFx : IDisposable
 
     /// <summary>The strength is how far the score is over its threshold, 0..1: a faint sound gives a short dim light,
     /// a loud one a long bright one. The log keeps the model's own score, for tuning.</summary>
-    void Fire(SoundKind kind, double score, double threshold, long now)
+    void Fire(SoundKind kind, double score, double threshold, long now, string? heard = null)
     {
         if (kind == SoundKind.Impact)
         {
@@ -382,7 +391,7 @@ public sealed class SoundFx : IDisposable
         // a siren or a horn comes every look while it lasts: log only its start
         bool ongoing = kind is SoundKind.Siren or SoundKind.Horn;
         ref long last = ref _lastHeard[(int)kind];
-        if (!ongoing || now - last > 2000) Log.Write($"soundfx: {kind} {score:F2}");
+        if (!ongoing || now - last > 2000) Log.Write($"soundfx: {kind} {score:F2}{(heard != null ? $" («{heard}»)" : "")}");
         last = now;
         double strength = Math.Clamp((score - threshold) / (1 - threshold), 0, 1);
         try { Effect?.Invoke(kind, strength); } catch (Exception ex) { Log.Error("soundfx effect", ex); }
