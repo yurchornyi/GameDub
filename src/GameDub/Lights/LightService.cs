@@ -145,13 +145,20 @@ public sealed class LightService : IDisposable
             foreach (var n in NetworkInterface.GetAllNetworkInterfaces())
                 if (n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
                     try { rx += n.GetIPStatistics().BytesReceived; } catch { }
-            // A game, not a video or a stream: a game launcher writes to disk too (in bursts, so within the last 10 s).
-            long written = Launchers.Written();
-            if (_launcherWritten >= 0 && written - _launcherWritten > 200 * 1024) _launcherTick = now;
-            _launcherWritten = written;
-            bool game = _launcherTick > 0 && now - _launcherTick < 10_000;
-            if (_rxPrev >= 0) { _rxHits = rx - _rxPrev > 500 * 1024 && game ? _rxHits + 1 : 0; if (_rxHits >= 20) _busyTick = now; }
+            bool busy = _rxPrev >= 0 && rx - _rxPrev > 500 * 1024;
             _rxPrev = rx;
+            // A game, not a video or a stream: a game launcher writes to disk too (in bursts, so within the last 10 s).
+            // Looked at only while the network is busy: the process list costs a little.
+            if (busy)
+            {
+                long written = Launchers.Written();
+                if (_launcherWritten >= 0 && written - _launcherWritten > 200 * 1024) _launcherTick = now;
+                _launcherWritten = written;
+            }
+            else _launcherWritten = -1;
+            bool game = _launcherTick > 0 && now - _launcherTick < 10_000;
+            _rxHits = busy && game ? _rxHits + 1 : 0;
+            if (_rxHits >= 20) _busyTick = now;
             bool was = _downloading;
             _downloading = s.LightsDownload && _busyTick > 0 && now - _busyTick < 120_000;
             if (was && !_downloading && s.LightsDownload) _downloaded = true;  // green until he touches the console
@@ -379,8 +386,8 @@ static class Input
 /// </summary>
 static class Launchers
 {
-    static readonly string[] Names = { "steam", "EpicGamesLauncher", "EADesktop", "EABackgroundService", "upc", "Agent",
-        "Battle.net", "GalaxyClient", "GalaxyClientService", "gamingservices", "XboxPcApp" };
+    static readonly HashSet<string> Names = new(StringComparer.OrdinalIgnoreCase) { "steam", "EpicGamesLauncher", "EADesktop",
+        "EABackgroundService", "upc", "Agent", "Battle.net", "GalaxyClient", "GalaxyClientService", "gamingservices", "XboxPcApp" };
     [StructLayout(LayoutKind.Sequential)]
     struct IoCounters { public ulong ReadOps, WriteOps, OtherOps, ReadBytes, WriteBytes, OtherBytes; }
     [DllImport("kernel32.dll")] static extern bool GetProcessIoCounters(IntPtr process, out IoCounters counters);
@@ -389,15 +396,15 @@ static class Launchers
     public static long Written()
     {
         long sum = 0;
-        foreach (var name in Names)
-            foreach (var p in Process.GetProcessesByName(name))
-                using (p)
-                {
-                    IntPtr h = Native.OpenProcess(QueryLimited, false, (uint)p.Id);
-                    if (h == IntPtr.Zero) continue;
-                    try { if (GetProcessIoCounters(h, out var c)) sum += (long)c.WriteBytes; }
-                    finally { Native.CloseHandle(h); }
-                }
+        foreach (var p in Process.GetProcesses())   // one snapshot of the process list
+            using (p)
+            {
+                if (!Names.Contains(p.ProcessName)) continue;
+                IntPtr h = Native.OpenProcess(QueryLimited, false, (uint)p.Id);
+                if (h == IntPtr.Zero) continue;
+                try { if (GetProcessIoCounters(h, out var c)) sum += (long)c.WriteBytes; }
+                finally { Native.CloseHandle(h); }
+            }
         return sum;
     }
 }
