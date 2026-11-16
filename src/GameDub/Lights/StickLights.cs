@@ -36,7 +36,11 @@ public sealed class StickLights : IDisposable
                 var lamps = await LampArray.FromIdAsync(info.Id);
                 if (lamps == null) return;
                 var (left, right) = Split(lamps);
-                lamps.AvailabilityChanged += (_, _) => { lock (_gate) if (_devices.TryGetValue(info.Id, out var d)) d.Shown = null; };
+                lamps.AvailabilityChanged += (s, _) =>
+                {
+                    lock (_gate) if (_devices.TryGetValue(info.Id, out var d)) d.Shown = null;
+                    Log.Write($"lights: {(s.IsAvailable ? "ours" : "taken by another app")}");
+                };
                 lock (_gate) _devices[info.Id] = new Device { Lamps = lamps, Left = left, Right = right };
                 Log.Write($"lights: {info.Name}, {lamps.LampCount} lamps ({left.Length} left, {right.Length} right), available={lamps.IsAvailable}");
             }
