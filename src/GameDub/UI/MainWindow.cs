@@ -301,7 +301,7 @@ public sealed class MainWindow : Window
         list.Children.Add(Section("Підсвітка стіків"));
         Button LightToggle(string label, Func<bool> get, Action<bool> set, string note) => Toggle(label, get, v => { set(v); SaveSettings(); }, note);
         list.Children.Add(LightToggle("Підсвітка стіків", () => _s.LightsOn, v => _s.LightsOn = v,
-            "Темні, поки нічого не відбувається · яскравість як у екрана · на телевізорі вимкнені"));
+            "Увімк. — світить GameDub: темні в спокої, яскравість як у екрана · Вимк. — твій колір з Armoury"));
         list.Children.Add(LightToggle("Спалахи на звукові ефекти", () => _s.LightsSound, v => _s.LightsSound = v,
             "Удар — помаранчевий · сирена — червоний і синій · гудок — жовтий двічі · грім — білий · серце — червоний «тук-тук»"));
         list.Children.Add(LightToggle("Вібрація на вибухи й удари", () => _s.LightsRumble, v => _s.LightsRumble = v,
