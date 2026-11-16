@@ -81,7 +81,7 @@ public sealed class TrayApp : ApplicationContext
         _timer.Start();
         Tick();
         Log.Write("tray started");
-        if (Autostart.OffInWindows()) Log.Write("autostart is switched off in Windows (Settings -> Apps -> Startup): the tray will not start after a restart");
+        System.Threading.Tasks.Task.Run(Autostart.Migrate); // an old Run-key autostart: the full screen experience skips it
     }
 
     void Reload(bool force = false)
