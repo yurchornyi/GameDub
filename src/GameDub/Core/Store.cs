@@ -91,6 +91,9 @@ public sealed class AppSettings
     public bool LightsOverGames { get; set; } = false;
     public List<string> LightsSkipGames { get; set; } = new() { "eurotrucks2", "amtrucks" };
 
+    // Launchers out of the way (Tray\QuietLaunchers): no start with Windows, never over the game, closed after it.
+    public bool QuietLaunchers { get; set; } = true;
+
     public void NormalizeApiKeys()
     {
         GoogleApiKeys = CleanApiKeys(GoogleApiKeys, GoogleApiKey);
