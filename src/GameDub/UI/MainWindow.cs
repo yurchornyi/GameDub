@@ -303,11 +303,11 @@ public sealed class MainWindow : Window
         list.Children.Add(Section("Підсвітка стіків"));
         Button LightToggle(string label, Func<bool> get, Action<bool> set, string note) => Toggle(label, get, v => { set(v); SaveSettings(); }, note);
         list.Children.Add(LightToggle("Підсвітка стіків", () => _s.LightsOn, v => _s.LightsOn = v,
-            "Темні, поки нічого не відбувається; на телевізорі вимкнені"));
+            "Увімк. — світить GameDub: темні в спокої, яскравість як у екрана · Вимк. — твій колір з Armoury"));
         list.Children.Add(LightToggle("Спалахи на звукові ефекти", () => _s.LightsSound, v => _s.LightsSound = v,
-            "Удар — помаранчевий · сирена — червоний і синій · гудок — жовтий двічі · грім — білий · серце — червоний «тук-тук»"));
-        list.Children.Add(LightToggle("Вібрація на вибухи й удари", () => _s.LightsRumble, v => _s.LightsRumble = v,
-            "Коротка вібрація на удар і гудок, для ігор, які самі не вібрують"));
+            "Світять, поки чути звук · удар — помаранчевий: легкий коротко, сильний довше · постріли — помаранчевий блиск на кожен, твій яскраво, далекий слабко · сирена — червоний і синій · гудок — жовтий · грім — білий · серце — червоний «тук-тук»"));
+        list.Children.Add(LightToggle("Гонки", () => _s.LightsRacing, v => _s.LightsRacing = v,
+            "Гальмо — червоне, лише в гонках (жанр Racing у Steam) · Forza: аварія — помаранчева, «перемикай» — синє (Data Out: 127.0.0.1, порт 5300)"));
         list.Children.Add(LightToggle("Завантаження ігор", () => _s.LightsDownload, v => _s.LightsDownload = v,
             "Синє «дихання», поки лаунчер качає гру · зелене — скачалось, до дотику"));
         list.Children.Add(LightToggle("Мало заряду і зарядка", () => _s.LightsBattery, v => _s.LightsBattery = v,
@@ -315,6 +315,8 @@ public sealed class MainWindow : Window
         list.Children.Add(LightToggle("Перегрів", () => _s.LightsHeat, v => _s.LightsHeat = v,
             "Від 85 °C — помаранчеве «дихання» раз на 20 с"));
         list.Children.Add(Number("Яскравість у спокої", () => _s.LightsBase, v => _s.LightsBase = v, 0, 50, 5, v => v + " %"));
+        list.Children.Add(LightToggle("Моє світло і в іграх зі своїм", () => _s.LightsOverGames, v => _s.LightsOverGames = v,
+            "Увімк. — GameDub світить і там, де гра керує підсвіткою сама · Вимк. — там світить гра (список нижче й ігри з Dynamic Lighting)"));
         list.Children.Add(TextRow("Ігри зі своїм світлом", () => string.Join(", ", _s.LightsSkipGames),
             v => _s.LightsSkipGames = v.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(x => x.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? x[..^4] : x).Distinct(StringComparer.OrdinalIgnoreCase).ToList()));
