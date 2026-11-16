@@ -17,6 +17,7 @@ namespace GameDub.Lights;
 /// Games listed in <see cref="AppSettings.LightsSkipGames"/>, and any game that takes the lamps itself through
 /// Windows Dynamic Lighting, are left alone. Dark screen: lights off, except a running download.
 /// The console on a TV (an external display active): lights, rumble and listening off, the sticks are out of sight.
+/// Racing: brake lights and, with Forza's telemetry, a shift light and crashes. The sticks are as bright as the screen.
 /// Switched off in the settings, the tray disposes this, and Windows' own lighting effect comes back.
 /// </summary>
 public sealed class LightService : IDisposable
@@ -29,9 +30,9 @@ public sealed class LightService : IDisposable
     // Every effect rises softly, holds, then fades on a curve that looks even to the eye, 30 frames a second.
     // Each effect has its own shape, so it reads even where colors look alike: one long pulse (impact), two blinks
     // (horn), two sharp strokes (thunder), a lub-dub (heartbeat), red and blue in turn (siren), slow breathing (states).
-    const int FrameMs = 33, SirenPeriod = 1200, HeartPeriod = 1000, HeartDub = 250, ThunderMs = 700, HornGap = 260, HornMs = HornGap + 350;
+    const int FrameMs = 33, SirenPeriod = 1200, ShiftPeriod = 500, ShiftGap = 180, HeartPeriod = 1000, HeartDub = 250, ThunderMs = 700, HornGap = 260, HornMs = HornGap + 350;
     static readonly Pulse ImpactPulse = new(120, 600, 900), HornBlink = new(40, 110, 200), ChargePulse = new(150, 600, 900),
-        HeartBeat = new(60, 60, 220);
+        HeartBeat = new(60, 60, 220), ShiftBlink = new(20, 60, 80);
 
     /// <summary>Brightness 0..1 of a one-shot effect over time: smooth rise, hold, then a squared fall
     /// (LED light looks linear to the eye only on a curve; a straight fall seems to hang, then drop).</summary>
@@ -53,7 +54,10 @@ public sealed class LightService : IDisposable
     readonly DisplayWatcher _display;
     AppSettings _s = new();
     SoundFx? _sound;
+    Telemetry? _telemetry;
     readonly object _gate = new();
+    int _pad = -1;                 // the connected XInput pad, looked for once a second (empty slots are slow)
+    double _screen = 1; long _screenTick; // the screen's brightness, 0.1..1: the sticks follow it
 
     // one-shot effect
     long _fxStart; int _fxMs; SoundKind? _fx; double _fxStrength;
@@ -94,14 +98,29 @@ public sealed class LightService : IDisposable
                 catch (Exception ex) { Log.Error("soundfx start", ex); _sound = null; }
             }
             else if (!wantSound && _sound != null) { _sound.Dispose(); _sound = null; }
+
+            bool wantRace = s.LightsOn && s.LightsRacing;
+            if (wantRace && _telemetry == null)
+            {
+                try { _telemetry = new Telemetry(); _telemetry.Crash += OnCrash; }
+                catch (Exception ex) { Log.Error("telemetry start", ex); _telemetry = null; }
+            }
+            else if (!wantRace && _telemetry != null) { _telemetry.Dispose(); _telemetry = null; }
         }
+    }
+
+    /// <summary>A crash in Forza's telemetry: the impact light. No rumble: the game rumbles itself.</summary>
+    void OnCrash(double strength)
+    {
+        if (_docked) return;
+        lock (_gate) { _fx = SoundKind.Impact; _fxStrength = strength; _fxStart = Environment.TickCount64; _fxMs = ImpactPulse.Total; }
     }
 
     void OnSound(SoundKind kind, double strength)
     {
         if (_docked) return;                  // on a TV: the sticks are out of sight and the pad in hand is another one
         AppSettings s; lock (_gate) s = _s;
-        if (s.LightsRumble && !_skip) Rumble.Pulse(kind, strength);
+        if (s.LightsRumble && !_skip && _telemetry?.Live != true) Rumble.Pulse(kind, strength); // Forza rumbles itself
         if (!s.LightsSound) return;
         long now = Environment.TickCount64;
         lock (_gate)
@@ -138,6 +157,13 @@ public sealed class LightService : IDisposable
             if (_sound is { } snd) snd.Paused = _docked || _display.Off;
             if (Input.Touched(ref _lastInputTick, ref _lastPadPacket)) _downloaded = false; // XInput is slow for empty slots: once a second
             if (now % 60000 < 1000) _accent = ReadAccent();
+            if (s.LightsRacing && (_pad < 0 || Native.XInputGetState(_pad, out _) != 0)) _pad = FirstPad();
+            if (now - _screenTick > 3000)
+            {
+                // 0 % is the console's own download dimming (start.ps1): keep the last real brightness then
+                _screenTick = now;
+                if (Backlight.Percent() is int b && b > 0) _screen = Math.Clamp(b / 100.0, 0.1, 1);
+            }
             _skip = s.LightsSkipGames.Count > 0 && ForegroundExe() is string exe && s.LightsSkipGames.Any(g => exe.Equals(g, StringComparison.OrdinalIgnoreCase));
 
             // download: received bytes over all live adapters
@@ -179,7 +205,7 @@ public sealed class LightService : IDisposable
 
     /// <summary>
     /// Show one effect on request, for the owner to see them one by one: write its name to data\lights-demo.txt
-    /// (impact, siren, horn, thunder, heartbeat, battery, charge, download, downloaded, heat). The file is deleted when read.
+    /// (impact, siren, horn, thunder, heartbeat, brake, shift, battery, charge, download, downloaded, heat). The file is deleted when read.
     /// </summary>
     void Demo(long now)
     {
@@ -216,14 +242,14 @@ public sealed class LightService : IDisposable
             long now = Environment.TickCount64;
             if (_skip)                                // a game with its own lighting: leave the idle glow, then hands off
             {
-                if (!_skipShown) { _lights.Show(_accent.Scale(s.LightsBase / 100.0), _accent.Scale(s.LightsBase / 100.0)); _skipShown = true; }
+                if (!_skipShown) { var g = _accent.Scale(s.LightsBase / 100.0 * _screen); _lights.Show(g, g); _skipShown = true; }
                 return;
             }
             _skipShown = false;
             if (!_lights.Available) return;           // Windows gave the lamps to the foreground app
 
             var (l, r) = Render(s, now);
-            _lights.Show(l, r);
+            _lights.Show(l.Scale(_screen), r.Scale(_screen));
         }
         catch (Exception ex) { Log.Error("lights frame", ex); }
     }
@@ -262,7 +288,9 @@ public sealed class LightService : IDisposable
             double w = 0.5 - 0.5 * Math.Cos(2 * Math.PI * a / SirenPeriod), env = Math.Clamp(Math.Min(a / 150.0, (su - now) / 400.0), 0, 1);
             return (Rgb.Mix(idle, Red, env * w * w), Rgb.Mix(idle, Blue, env * (1 - w) * (1 - w)));
         }
-        // 2b. a heartbeat in the game (low health in many games): a dim red lub-dub once a second while it is heard
+        // 2b. racing: brake lights, and Forza's shift light
+        if (!dark && s.LightsRacing && RaceLight(now) is Rgb race) return (race, race);
+        // 2c. a heartbeat in the game (low health in many games): a dim red lub-dub once a second while it is heard
         long hs, hu; lock (_gate) { hs = _heartStart; hu = _heartUntil; }
         if (!dark && now < hu)
         {
@@ -294,6 +322,36 @@ public sealed class LightService : IDisposable
         _ => 0
     };
 
+    /// <summary>
+    /// Racing lights. With Forza's telemetry coming in, only it counts (the trigger is not looked at, so nothing lights
+    /// twice): "shift up" near the rev limit with the throttle down, blue double blinks; else the brake pedal. Without
+    /// telemetry: the left trigger, but only while an engine is heard, so aiming in a shooter does not light.
+    /// Red as hard as the brake is pressed.
+    /// </summary>
+    Rgb? RaceLight(long now)
+    {
+        double brake = 0; bool shift = false;
+        if (now < _demoUntil && _demo is ("brake" or "shift"))
+        {
+            shift = _demo == "shift";
+            brake = 0.5 - 0.5 * Math.Cos(2 * Math.PI * now / 2000.0);
+        }
+        else if (_telemetry is { Live: true } tm) { brake = tm.Brake; shift = tm.Rev >= 0.93 && tm.Throttle > 0.5; }
+        else if (_pad >= 0 && _sound?.EngineHeard == true && Native.XInputGetState(_pad, out var st) == 0) brake = st.Gamepad.bLeftTrigger / 255.0;
+        if (shift)
+        {
+            long p = now % ShiftPeriod;
+            return Blue.Scale(Math.Max(ShiftBlink.At(p), ShiftBlink.At(p - ShiftGap)));
+        }
+        return brake > 0.08 ? Red.Scale(0.3 + 0.7 * brake) : null;
+    }
+
+    static int FirstPad()
+    {
+        for (int i = 0; i < 4; i++) if (Native.XInputGetState(i, out _) == 0) return i;
+        return -1;
+    }
+
     /// <summary>Slow breathing 0..1, squared so it swells and ebbs evenly to the eye.</summary>
     static double Breath(double t, double period) { double b = 0.5 - 0.5 * Math.Cos(2 * Math.PI * t / period); return b * b; }
 
@@ -320,6 +378,7 @@ public sealed class LightService : IDisposable
     {
         _frame.Dispose(); _slow.Dispose();
         _sound?.Dispose();
+        _telemetry?.Dispose();
         _display.Dispose();
         _lights.Dispose();
     }
@@ -406,6 +465,21 @@ static class Launchers
                 finally { Native.CloseHandle(h); }
             }
         return sum;
+    }
+}
+
+/// <summary>The built-in screen's brightness, 0..100 (WMI), or null when Windows does not tell (no built-in panel).</summary>
+static class Backlight
+{
+    public static int? Percent()
+    {
+        try
+        {
+            using var q = new System.Management.ManagementObjectSearcher(@"root\wmi", "SELECT CurrentBrightness FROM WmiMonitorBrightness");
+            foreach (System.Management.ManagementObject m in q.Get()) using (m) return Convert.ToInt32(m["CurrentBrightness"]);
+        }
+        catch { }
+        return null;
     }
 }
 

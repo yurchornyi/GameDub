@@ -30,6 +30,10 @@ public sealed class SoundFx : IDisposable
     static readonly string[] SirenNames = { "Siren", "Civil defense siren", "Police car (siren)", "Ambulance (siren)", "Fire engine, fire truck (siren)",
         "Alarm", "Car alarm", "Smoke detector, smoke alarm", "Fire alarm" };
     static readonly string[] HornNames = { "Vehicle horn, car horn, honking", "Air horn, truck horn", "Train horn", "Foghorn" };
+    // an engine running: a racing game, where the left trigger is the brake
+    static readonly string[] EngineNames = { "Vehicle", "Motor vehicle (road)", "Car", "Race car, auto racing", "Truck", "Motorcycle",
+        "Engine", "Light engine (high frequency)", "Medium engine (mid frequency)", "Heavy engine (low frequency)", "Idling",
+        "Accelerating, revving, vroom", "Tire squeal", "Skidding" };
     static readonly string[] HeartNames = { "Heart sounds, heartbeat", "Heart murmur" };
     // "Thunderstorm" is rain as well, heard for minutes: only the clap counts
     static readonly string[] ThunderNames = { "Thunder" };
@@ -39,7 +43,7 @@ public sealed class SoundFx : IDisposable
 
     readonly InferenceSession _model;
     readonly string _input, _output;
-    readonly int[] _impact, _siren, _horn, _heart, _thunder;
+    readonly int[] _impact, _siren, _horn, _heart, _thunder, _engine;
     readonly float[] _ring = new float[Rate * 2];
     readonly object _gate = new();
     int _write;
@@ -56,6 +60,10 @@ public sealed class SoundFx : IDisposable
     string[] _names = Array.Empty<string>();
     double _peak;
 
+    long _engineTick;
+    /// <summary>An engine was heard within the last 3 s: a racing game is on.</summary>
+    public bool EngineHeard => Environment.TickCount64 - Interlocked.Read(ref _engineTick) < 3000;
+
     /// <summary>No listening while nobody sees the lights (screen off, the console on a TV): no work for the model.</summary>
     public volatile bool Paused;
 
@@ -67,7 +75,7 @@ public sealed class SoundFx : IDisposable
         var names = File.ReadAllLines(Path.Combine(ModelDir, "yamnet_class_map.csv")).Skip(1)
             .Select(l => l.Split(',', 3)).Where(p => p.Length == 3).Select(p => (i: int.Parse(p[0]), name: p[2].Trim().Trim('"'))).ToList();
         int[] Find(string[] wanted) => names.Where(n => wanted.Contains(n.name)).Select(n => n.i).ToArray();
-        _impact = Find(ImpactNames); _siren = Find(SirenNames); _horn = Find(HornNames); _heart = Find(HeartNames); _thunder = Find(ThunderNames);
+        _impact = Find(ImpactNames); _siren = Find(SirenNames); _horn = Find(HornNames); _heart = Find(HeartNames); _thunder = Find(ThunderNames); _engine = Find(EngineNames);
         _names = new string[521];
         foreach (var n in names) if (n.i >= 0 && n.i < 521) _names[n.i] = n.name;
 
@@ -164,6 +172,7 @@ public sealed class SoundFx : IDisposable
             double Max(int[] idx) { double m = 0; for (int f = 0; f < frames; f++) foreach (var i in idx) m = Math.Max(m, scores[f, i]); return m; }
             double impact = Max(_impact), siren = Max(_siren), horn = Max(_horn), heart = Max(_heart), thunder = Max(_thunder);
             long now = Environment.TickCount64;
+            if (Max(_engine) > 0.3) Interlocked.Exchange(ref _engineTick, now);
             Stats(scores, frames, impact, siren, horn, heart, thunder, now);
             if (impact > 0.35) Fire(SoundKind.Impact, Math.Min(1, impact), now);
             if (siren > 0.4) Fire(SoundKind.Siren, siren, now); // every look while it wails; the light runs on meanwhile

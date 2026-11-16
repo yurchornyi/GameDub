@@ -301,11 +301,13 @@ public sealed class MainWindow : Window
         list.Children.Add(Section("Підсвітка стіків"));
         Button LightToggle(string label, Func<bool> get, Action<bool> set, string note) => Toggle(label, get, v => { set(v); SaveSettings(); }, note);
         list.Children.Add(LightToggle("Підсвітка стіків", () => _s.LightsOn, v => _s.LightsOn = v,
-            "Темні, поки нічого не відбувається; на телевізорі вимкнені"));
+            "Темні, поки нічого не відбувається · яскравість як у екрана · на телевізорі вимкнені"));
         list.Children.Add(LightToggle("Спалахи на звукові ефекти", () => _s.LightsSound, v => _s.LightsSound = v,
             "Удар — помаранчевий · сирена — червоний і синій · гудок — жовтий двічі · грім — білий · серце — червоний «тук-тук»"));
         list.Children.Add(LightToggle("Вібрація на вибухи й удари", () => _s.LightsRumble, v => _s.LightsRumble = v,
             "Коротка вібрація на удар і гудок, для ігор, які самі не вібрують"));
+        list.Children.Add(LightToggle("Гонки", () => _s.LightsRacing, v => _s.LightsRacing = v,
+            "Гальмо — червоне · Forza: аварія — помаранчева, «перемикай» — синє (Data Out: 127.0.0.1, порт 5300)"));
         list.Children.Add(LightToggle("Завантаження ігор", () => _s.LightsDownload, v => _s.LightsDownload = v,
             "Синє «дихання», поки лаунчер качає гру · зелене — скачалось, до дотику"));
         list.Children.Add(LightToggle("Мало заряду і зарядка", () => _s.LightsBattery, v => _s.LightsBattery = v,
