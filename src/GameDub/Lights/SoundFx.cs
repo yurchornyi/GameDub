@@ -24,8 +24,9 @@ public enum SoundKind { Impact, Siren, Horn, Heartbeat, Thunder }
 public sealed class SoundFx : IDisposable
 {
     const int Rate = 16000, Window = 15600, HopMs = 480;
+    // Real hits only: "Slam", "Thump, thud" and "Burst, pop" also name doors, footsteps and bubbles
     static readonly string[] ImpactNames = { "Explosion", "Gunshot, gunfire", "Machine gun", "Fusillade", "Artillery fire", "Cap gun",
-        "Fireworks", "Firecracker", "Burst, pop", "Eruption", "Boom", "Bang", "Slam", "Smash, crash", "Breaking", "Shatter", "Thump, thud" };
+        "Fireworks", "Firecracker", "Eruption", "Boom", "Bang", "Smash, crash", "Breaking", "Shatter" };
     static readonly string[] SirenNames = { "Siren", "Civil defense siren", "Police car (siren)", "Ambulance (siren)", "Fire engine, fire truck (siren)",
         "Alarm", "Car alarm", "Smoke detector, smoke alarm", "Fire alarm" };
     static readonly string[] HornNames = { "Vehicle horn, car horn, honking", "Air horn, truck horn", "Train horn", "Foghorn" };
