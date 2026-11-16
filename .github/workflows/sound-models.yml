@@ -1,0 +1,68 @@
+name: sound-models
+
+# Exports the stick lighting's sound models (EfficientAT, CLAP) to ONNX, checks them against the originals and
+# compares them with YAMNet on public sounds. Runs when the scripts change, or by hand.
+on:
+  pull_request:
+    paths:
+      - 'src/tools/sound-models/**'
+      - '.github/workflows/sound-models.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  models:
+    # Public repository: GitHub-hosted runner only.
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1 torchaudio==2.5.1 torchvision==0.20.1
+          pip install -r src/tools/sound-models/requirements.txt
+      - name: Export
+        run: python src/tools/sound-models/export.py --out work/models --work work/src
+      - name: YAMNet (the model the app uses today)
+        run: |
+          mkdir -p work/yamnet
+          curl -sfL https://huggingface.co/zeropointnine/yamnet-onnx/resolve/main/yamnet.onnx -o work/yamnet/yamnet.onnx
+          curl -sfL https://huggingface.co/zeropointnine/yamnet-onnx/resolve/main/yamnet_class_map.csv -o work/yamnet/yamnet_class_map.csv
+      - id: data
+        uses: actions/cache/restore@v4
+        with:
+          path: work/data
+          key: sound-eval-data-v1
+      - name: Evaluate
+        run: python src/tools/sound-models/evaluate.py --models work/models --yamnet work/yamnet --data work/data --report work/report.md --scores work/scores.json.gz
+      # the sounds are kept even when a later step fails, so a rerun does not download them again
+      - uses: actions/cache/save@v4
+        if: always() && steps.data.outputs.cache-hit != 'true'
+        with:
+          path: work/data
+          key: sound-eval-data-v1
+      - name: Report
+        if: always()
+        run: if [ -f work/report.md ]; then cat work/report.md >> "$GITHUB_STEP_SUMMARY"; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sound-models
+          path: |
+            work/models/*.onnx
+            work/models/*.csv
+            work/models/export.json
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sound-eval
+          path: |
+            work/report.md
+            work/scores.json.gz
+          retention-days: 14
