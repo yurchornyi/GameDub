@@ -42,6 +42,8 @@ public sealed class LightService : IDisposable
     long _lastInputTick; uint _lastPadPacket;
     long _heatTick;
     string _demo = ""; long _demoUntil;
+    Rgb _logged = new(-1, -1, -1); long _loggedAt;
+    static string Hex8(Rgb c) => $"#{(int)(Math.Clamp(c.R, 0, 1) * 255):X2}{(int)(Math.Clamp(c.G, 0, 1) * 255):X2}{(int)(Math.Clamp(c.B, 0, 1) * 255):X2}";
 
     public LightService()
     {
@@ -162,6 +164,11 @@ public sealed class LightService : IDisposable
             if (!_lights.Available) return;           // Windows gave the lamps to the foreground app
 
             var (l, r) = Render(s, now);
+            if (l != _logged && now - _loggedAt > 500)
+            {
+                _logged = l; _loggedAt = now;
+                Log.Write($"lights: show {Hex8(l)} / {Hex8(r)} (dark={_display.Off}, downloading={_downloading}, done={_downloaded}, low={_batteryLow})");
+            }
             _lights.Show(l, r);
         }
         catch (Exception ex) { Log.Error("lights frame", ex); }
@@ -277,10 +284,15 @@ static class Input
         bool touched = false;
         var li = new LastInput { Size = (uint)Marshal.SizeOf<LastInput>() };
         if (GetLastInputInfo(ref li)) { if (lastInput != 0 && li.Time != lastInput) touched = true; lastInput = li.Time; }
-        uint pad = 0;
-        for (int i = 0; i < 4; i++) if (Native.XInputGetState(i, out var st) == 0) pad += st.dwPacketNumber;
-        if (lastPad != 0 && pad != lastPad) touched = true;
-        lastPad = pad;
+        // A real press, not the packet counter: the sticks' noise bumps that all the time.
+        for (int i = 0; i < 4; i++)
+        {
+            if (Native.XInputGetState(i, out var st) != 0) continue;
+            var g = st.Gamepad;
+            if (g.wButtons != 0 || g.bLeftTrigger > 40 || g.bRightTrigger > 40 ||
+                Math.Abs((int)g.sThumbLX) > 9000 || Math.Abs((int)g.sThumbLY) > 9000 || Math.Abs((int)g.sThumbRX) > 9000 || Math.Abs((int)g.sThumbRY) > 9000)
+                touched = true;
+        }
         return touched;
     }
 }
