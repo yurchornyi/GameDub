@@ -45,7 +45,8 @@ public sealed class SoundFx : IDisposable
     readonly Timer _hop;
     int _busy;
     // loudness gate on 20 ms blocks
-    double _block, _slow = 0.01;
+    double _block, _slow;
+    int _warm; // 20 ms blocks heard since the capture started: the bed is known after 2 s
     int _blockN;
     long _lastEffectTick, _lastImpactTick, _lastSirenTick, _lastHornTick;
     double _lastImpactScore;
@@ -102,6 +103,7 @@ public sealed class SoundFx : IDisposable
     void StopCapture()
     {
         var c = _capture; _capture = null;
+        lock (_gate) { _warm = 0; _slow = 0; }
         if (c == null) return;
         try { c.StopRecording(); } catch { }
         c.Dispose();
@@ -142,6 +144,7 @@ public sealed class SoundFx : IDisposable
         _block = 0; _blockN = 0;
         _peak = Math.Max(_peak * 0.9, rms);
         double ratio = rms / Math.Max(_slow, 1e-4);
+        bool warm = ++_warm > 100;
         _slow = _slow * 0.99 + rms * 0.01; // ~2 s memory
         if (rms > 0.02)
         {
@@ -151,7 +154,7 @@ public sealed class SoundFx : IDisposable
             if (ratio >= 4) _jumps4++;
         }
         // A sound out of silence (a game starting, a menu click after a pause) is no effect: the bed must be playing.
-        if (rms < 0.04 || ratio < JumpRatio || _slowBefore < 0.01) { _slowBefore = _slow; return; }
+        if (!warm || rms < 0.04 || ratio < JumpRatio || _slowBefore < 0.01) { _slowBefore = _slow; return; }
         _slowBefore = _slow;
         long now = Environment.TickCount64;
         if (now - _talkTick < 1500) { _jumpsTalk++; return; } // speech or music: not an effect
