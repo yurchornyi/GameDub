@@ -154,6 +154,57 @@ public sealed class SoundFx : IDisposable
 
     double _phase; // resampler position in input samples
 
+    // A recording of what is heard (16 kHz mono float), for the test to replay: on while data\lights-record.txt exists,
+    // at most five minutes. Only for tuning on the console; nothing is recorded otherwise.
+    FileStream? _rec;
+    long _recSamples;
+    static string RecordSwitch => Path.Combine(Paths.Data, "lights-record.txt");
+    public static string RecordFile => Path.Combine(Paths.Data, "sound-rec.raw");
+
+    void Record(List<float> mono)
+    {
+        if (_rec == null || _recSamples > Rate * 300L) return;
+        var bytes = new byte[mono.Count * 4];
+        for (int i = 0; i < mono.Count; i++) BitConverter.TryWriteBytes(bytes.AsSpan(i * 4), mono[i]);
+        _rec.Write(bytes);
+        _recSamples += mono.Count;
+    }
+
+    void RecordSwitchCheck()
+    {
+        bool want = File.Exists(RecordSwitch);
+        lock (_gate)
+        {
+            if (want && _rec == null)
+            {
+                _rec = new FileStream(RecordFile, FileMode.Create, FileAccess.Write, FileShare.Read); _recSamples = 0;
+                Log.Write("soundfx: recording to " + RecordFile);
+            }
+            else if (!want && _rec != null)
+            {
+                Log.Write($"soundfx: recorded {_recSamples / (double)Rate:F0} s");
+                _rec.Dispose(); _rec = null;
+            }
+        }
+    }
+
+    /// <summary>The test: plays a recording through the same path in real time (so every timing rule holds).</summary>
+    public void Replay(string rawPath)
+    {
+        var data = File.ReadAllBytes(rawPath);
+        int total = data.Length / 4, chunk = Rate / 100;
+        var t0 = System.Diagnostics.Stopwatch.StartNew();
+        for (int at = 0; at < total; at += chunk)
+        {
+            var mono = new List<float>(chunk);
+            for (int i = at; i < Math.Min(total, at + chunk); i++) mono.Add(BitConverter.ToSingle(data, i * 4));
+            Push(mono);
+            int due = (int)((at + chunk) * 1000L / Rate - t0.ElapsedMilliseconds);
+            if (due > 0) Thread.Sleep(due);
+        }
+        Thread.Sleep(600);
+    }
+
     void Feed(byte[] buf, int bytes, WaveFormat fmt)
     {
         if (fmt.Encoding != WaveFormatEncoding.IeeeFloat && fmt.Encoding != WaveFormatEncoding.Extensible) return;
@@ -161,22 +212,33 @@ public sealed class SoundFx : IDisposable
         int ch = fmt.Channels, frames = bytes / 4 / ch;
         double step = fmt.SampleRate / (double)Rate;
         int avg = Math.Max(1, (int)Math.Round(step)); // box filter over one output period against aliasing
+        var mono = new List<float>(frames / Math.Max(1, (int)step) + 2);
+        for (; _phase < frames; _phase += step)
+        {
+            int start = (int)_phase;
+            double sum = 0; int n = 0;
+            for (int k = start; k < start + avg && k < frames; k++, n++)
+                for (int c = 0; c < ch; c++) sum += BitConverter.ToSingle(buf, (k * ch + c) * 4);
+            mono.Add(n == 0 ? 0 : (float)(sum / (n * ch)));
+        }
+        _phase -= frames;
+        Push(mono);
+    }
+
+    /// <summary>16 kHz mono samples, from the loopback or a recording replayed by the test.</summary>
+    void Push(List<float> mono)
+    {
         List<(float[] clip, float[] around, double rms)>? ready = null;
         lock (_gate)
         {
-            for (; _phase < frames; _phase += step)
+            foreach (float v in mono)
             {
-                int start = (int)_phase;
-                double sum = 0; int n = 0;
-                for (int k = start; k < start + avg && k < frames; k++, n++)
-                    for (int c = 0; c < ch; c++) sum += BitConverter.ToSingle(buf, (k * ch + c) * 4);
-                float v = n == 0 ? 0 : (float)(sum / (n * ch));
                 _ring[_write] = v;
                 _write = (_write + 1) % _ring.Length;
                 _samples++;
                 Gate(v);
             }
-            _phase -= frames;
+            Record(mono);
             // onsets whose 100 ms after have come: cut them out for the model
             while (_onsets.Count > 0 && _samples - _onsets[0].at >= PostSamples)
             {
@@ -325,6 +387,7 @@ public sealed class SoundFx : IDisposable
 
     void Classify()
     {
+        try { RecordSwitchCheck(); } catch (Exception ex) { Log.Error("soundfx record", ex); }
         if (Paused || Interlocked.Exchange(ref _busy, 1) == 1) return;
         try
         {
@@ -406,6 +469,7 @@ public sealed class SoundFx : IDisposable
         _stop = true;
         _cutReady.Release();
         _judge.Join(2000);
+        lock (_gate) { _rec?.Dispose(); _rec = null; }
         _model.Dispose();
     }
 }
