@@ -50,7 +50,8 @@ public sealed class SoundFx : IDisposable
     int _blockN;
     long _lastEffectTick, _lastImpactTick, _lastSirenTick, _lastHornTick;
     double _lastImpactScore;
-    const double JumpRatio = 3.0;
+    const double JumpRatio = 3.5;
+    double _hpBlock, _hpSlow, _maxHp; float _prev;
     long _talkTick;
     double _slowBefore;
     double _maxRatio; int _jumps2, _jumps3, _jumps4, _jumpsTalk;
@@ -103,7 +104,7 @@ public sealed class SoundFx : IDisposable
     void StopCapture()
     {
         var c = _capture; _capture = null;
-        lock (_gate) { _warm = 0; _slow = 0; }
+        lock (_gate) { _warm = 0; _slow = 0; _hpSlow = 0; }
         if (c == null) return;
         try { c.StopRecording(); } catch { }
         c.Dispose();
@@ -139,9 +140,13 @@ public sealed class SoundFx : IDisposable
     void Gate(float v)
     {
         _block += v * v;
+        float d = v - _prev; _prev = v; // first difference: the top of the spectrum (grinding, metal, glass)
+        _hpBlock += d * d;
         if (++_blockN < Rate / 50) return;
-        double rms = Math.Sqrt(_block / _blockN);
-        _block = 0; _blockN = 0;
+        double rms = Math.Sqrt(_block / _blockN), hp = Math.Sqrt(_hpBlock / _blockN);
+        _block = 0; _hpBlock = 0; _blockN = 0;
+        double hpRatio = hp / Math.Max(_hpSlow, 1e-5);
+        _hpSlow = _hpSlow * 0.99 + hp * 0.01;
         _peak = Math.Max(_peak * 0.9, rms);
         double ratio = rms / Math.Max(_slow, 1e-4);
         bool warm = ++_warm > 100;
@@ -149,16 +154,19 @@ public sealed class SoundFx : IDisposable
         if (rms > 0.02)
         {
             _maxRatio = Math.Max(_maxRatio, ratio);
+            _maxHp = Math.Max(_maxHp, hpRatio);
             if (ratio >= 2) _jumps2++;
             if (ratio >= 3) _jumps3++;
             if (ratio >= 4) _jumps4++;
         }
         // A sound out of silence (a game starting, a menu click after a pause) is no effect: the bed must be playing.
-        if (!warm || rms < 0.04 || ratio < JumpRatio || _slowBefore < 0.01) { _slowBefore = _slow; return; }
+        // A crash over an engine: louder, and much brighter (a rev is louder but not brighter). Or simply a big jump.
+        bool crash = ratio >= 2.2 && hpRatio >= 2.5;
+        if (!warm || rms < 0.04 || !(crash || ratio >= JumpRatio) || _slowBefore < 0.01) { _slowBefore = _slow; return; }
         _slowBefore = _slow;
         long now = Environment.TickCount64;
         if (now - _talkTick < 1500) { _jumpsTalk++; return; } // speech or music: not an effect
-        Fire(SoundKind.Impact, Math.Min(1, (ratio - JumpRatio) / 4 + 0.3), now);
+        Fire(SoundKind.Impact, Math.Min(1, Math.Max(ratio - 2, hpRatio - 2.5) / 3 + 0.4), now);
     }
 
     void Classify()
@@ -205,9 +213,9 @@ public sealed class SoundFx : IDisposable
         if (hopScore > 0.3 && IsTalk(hopTop)) _talkTick = now;
         if (now - _statTick < 10_000) return;
         Log.Write($"soundfx: {_hops} looks, max impact {_sumImpact:F2} siren {_sumSiren:F2} horn {_sumHorn:F2}, loudest «{_top}» {_topScore:F2}; " +
-                  $"jumps x2 {_jumps2} x3 {_jumps3} x4 {_jumps4} (in talk {_jumpsTalk}), max x{_maxRatio:F1}");
+                  $"jumps x2 {_jumps2} x3 {_jumps3} x4 {_jumps4} (in talk {_jumpsTalk}), max x{_maxRatio:F1}, bright x{_maxHp:F1}");
         _statTick = now; _hops = 0; _sumImpact = _sumSiren = _sumHorn = _topScore = 0; _top = "";
-        _maxRatio = 0; _jumps2 = _jumps3 = _jumps4 = _jumpsTalk = 0;
+        _maxRatio = 0; _maxHp = 0; _jumps2 = _jumps3 = _jumps4 = _jumpsTalk = 0;
     }
 
     static bool IsTalk(string name)
