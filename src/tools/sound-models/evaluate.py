@@ -596,6 +596,7 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--report", required=True)
     ap.add_argument("--scores", required=True)
+    ap.add_argument("--clips", default="work/test-clips")
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 2)
     a = ap.parse_args()
     clips = fetch_audioset(a.data) + fetch_esc50(a.data) + fetch_sfx(a.data)
@@ -620,6 +621,16 @@ def main():
                 print(f"{i}/{len(jobs)} clips, {time.time() - t0:.0f} s", flush=True)
     with gzip.open(a.scores, "wt") as f:
         json.dump(recs, f)
+    # a few clips as WAV, for the app's own test on the console (--test soundfx-files)
+    os.makedirs(a.clips, exist_ok=True)
+    want = {"as: gunfire": 3, "as: explosion": 2, "as: car crash": 3, "sfx: car collision": 1, "as: siren, alarm": 2,
+            "as: horn": 1, "as: door, knock": 2, "as: footsteps": 2, "as: vehicle": 2, "sfx: Door Sounds": 1, "sfx: Footsteps": 1}
+    paths = {os.path.basename(p): p for p, _ in clips}
+    for r in recs:
+        if want.get(r["group"], 0) > 0 and r["path"] in paths:
+            want[r["group"]] -= 1
+            x, sr = sf.read(paths[r["path"]], dtype="float32", always_2d=True)
+            sf.write(os.path.join(a.clips, os.path.splitext(r["path"])[0] + ".wav"), x, sr, subtype="PCM_16")
     report(recs, export, a.report)
     print(open(a.report).read())
 

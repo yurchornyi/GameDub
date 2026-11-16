@@ -65,4 +65,5 @@ jobs:
           path: |
             work/report.md
             work/scores.json.gz
+            work/test-clips/
           retention-days: 14

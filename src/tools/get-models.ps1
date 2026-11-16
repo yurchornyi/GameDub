@@ -32,7 +32,17 @@ Get-Files 'Xenova/opus-mt-ru-uk' "$root\opus-mt-ru-uk" @(
     'config.json', 'generation_config.json', 'tokenizer.json', 'tokenizer_config.json', 'vocab.json',
     'onnx/encoder_model_quantized.onnx', 'onnx/decoder_model_quantized.onnx') 'onnx/'
 
-Write-Host 'YAMNet - sound effects for the joystick lighting (Google, Apache-2.0), ~16 MB'
-Get-Files 'zeropointnine/yamnet-onnx' "$root\yamnet" @('yamnet.onnx', 'yamnet_class_map.csv')
+Write-Host 'Sound effects for the joystick lighting: EfficientAT (JKU Linz, MIT) and CLAP (LAION, Apache-2.0)'
+# exported to ONNX by src\tools\sound-models\export.py (the sound-models workflow) and kept in a GameDub release
+$rel = 'https://github.com/yurchornyi/GameDub/releases/download/sound-models-1'
+New-Item -ItemType Directory -Force "$root\sound" | Out-Null
+foreach ($f in 'efficientat.onnx', 'efficientat_class_map.csv', 'clap.onnx', 'clap_prompts.csv') {
+    $out = "$root\sound\$f"
+    if (Test-Path $out) { continue }
+    Write-Host "  $f"
+    Invoke-WebRequest "$rel/$f" -OutFile $out -UseBasicParsing
+}
+# YAMNet, the sound model before 16.11.2026, is no longer used
+if (Test-Path "$root\yamnet") { Remove-Item -Recurse -Force "$root\yamnet" }
 
 Write-Host 'Done.'

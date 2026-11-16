@@ -198,10 +198,11 @@ public sealed class SoundFx : IDisposable
         c.Dispose();
     }
 
-    /// <summary>For a test: plays a sound file into the effects in real time, as if Windows played it, without a speaker.</summary>
+    /// <summary>For a test: plays a WAV file into the effects in real time, as if Windows played it, without a speaker.</summary>
     public void PlayFile(string path)
     {
-        using var r = new AudioFileReader(path);
+        using var file = new WaveFileReader(path);
+        var r = file.ToSampleProvider();
         var fmt = WaveFormat.CreateIeeeFloatWaveFormat(r.WaveFormat.SampleRate, r.WaveFormat.Channels);
         int chunk = r.WaveFormat.SampleRate / 100 * r.WaveFormat.Channels;   // 10 ms
         var buf = new float[chunk];

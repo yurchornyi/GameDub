@@ -118,12 +118,21 @@ def export_eat(name, out, src, report):
 
     model = Wave().eval()
     path = os.path.join(out, f"efficientat-{name}.onnx")
+    fixed = None
     with torch.no_grad():
-        torch.onnx.export(model, (torch.randn(1, 32000) * 0.1,), path, input_names=["wave"], output_names=["scores"],
-                          dynamic_axes={"wave": {1: "samples"}}, opset_version=17, do_constant_folding=True)
+        try:
+            torch.onnx.export(model, (torch.randn(1, 32000) * 0.1,), path, input_names=["wave"], output_names=["scores"],
+                              dynamic_axes={"wave": {1: "samples"}}, opset_version=17, do_constant_folding=True)
+        except Exception as e:
+            # dymn pools to a size taken from the input: export it for the app's one second only
+            print(f"{name}: no export for any length ({type(e).__name__}), one second only")
+            fixed = 32000
+            torch.onnx.export(model, (torch.randn(1, 32000) * 0.1,), path, input_names=["wave"], output_names=["scores"],
+                              opset_version=17, do_constant_folding=True)
     sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
     worst = 0.0
-    tests = [torch.randn(1, n) * 0.1 for n in (16000, 32000, 48000)] + [torch.from_numpy(real_clip(32000))[None]]
+    tests = [torch.randn(1, n) * 0.1 for n in ((32000,) if fixed else (16000, 32000, 48000))]
+    tests.append(torch.from_numpy(real_clip(32000)[:fixed] if fixed else real_clip(32000))[None])
     for x in tests:
         with torch.no_grad():
             ref = model(x).numpy()
@@ -133,6 +142,7 @@ def export_eat(name, out, src, report):
     print(f"{name}: onnx vs pytorch, worst difference {worst:.2e} {'OK' if ok else 'FAIL'}")
     report[f"efficientat-{name}"] = {
         "file": os.path.basename(path), "mb": round(os.path.getsize(path) / 2**20, 1), "worst_diff": worst, "ok": ok,
+        "samples": fixed or "any",
         "ms_1s_1thread": bench(path, {"wave": np.zeros((1, 32000), np.float32) + 0.01}, 1),
         "ms_1s_2threads": bench(path, {"wave": np.zeros((1, 32000), np.float32) + 0.01}, 2),
     }
@@ -180,7 +190,8 @@ def export_clap(key, repo, out, report):
         torch.onnx.export(model, (x0,), path, input_names=["wave"], output_names=["probs", "embedding"],
                           opset_version=17, do_constant_folding=True)
     qpath = os.path.join(out, f"{key}.int8.onnx")
-    quantize_dynamic(path, qpath, weight_type=QuantType.QInt8)
+    # matrix products only: ONNX Runtime has no int8 convolution on the CPU (ConvInteger)
+    quantize_dynamic(path, qpath, weight_type=QuantType.QInt8, op_types_to_quantize=["MatMul", "Gemm"])
 
     sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
     qsess = ort.InferenceSession(qpath, providers=["CPUExecutionProvider"])
