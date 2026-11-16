@@ -20,6 +20,7 @@ public sealed class StickLights : IDisposable
         public required LampArray Lamps;
         public required int[] Left, Right;
         public (WinColor l, WinColor r)? Shown;
+        public long ShownAt;
     }
 
     readonly object _gate = new();
@@ -72,14 +73,17 @@ public sealed class StickLights : IDisposable
                 try
                 {
                     if (!d.Lamps.IsAvailable) { d.Shown = null; continue; }
-                    if (d.Shown is { } s && s.l.Equals(l) && s.r.Equals(r)) continue;
+                    // Unchanged colors go again every second: Armoury Crate writes its own color straight to the
+                    // device, past Dynamic Lighting, and would otherwise stay (16.11 test).
+                    long now = Environment.TickCount64;
+                    if (d.Shown is { } s && s.l.Equals(l) && s.r.Equals(r) && now - d.ShownAt < 1000) continue;
                     if (l.Equals(r) || d.Left.Length == 0 || d.Right.Length == 0) d.Lamps.SetColor(l);
                     else
                     {
                         d.Lamps.SetColorsForIndices(Enumerable.Repeat(l, d.Left.Length).ToArray(), d.Left);
                         d.Lamps.SetColorsForIndices(Enumerable.Repeat(r, d.Right.Length).ToArray(), d.Right);
                     }
-                    d.Shown = (l, r);
+                    d.Shown = (l, r); d.ShownAt = now;
                 }
                 catch (Exception ex) { Log.Error("lights show", ex); d.Shown = null; }
             }

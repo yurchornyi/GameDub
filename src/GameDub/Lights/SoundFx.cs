@@ -51,6 +51,7 @@ public sealed class SoundFx : IDisposable
     double _lastImpactScore;
     const double JumpRatio = 3.0;
     long _talkTick;
+    double _slowBefore;
     double _maxRatio; int _jumps2, _jumps3, _jumps4, _jumpsTalk;
     // what was heard, for the log: strongest effect scores and the loudest top class over 10 s
     double _sumImpact, _sumSiren, _sumHorn; string _top = ""; double _topScore; int _hops; long _statTick;
@@ -149,7 +150,9 @@ public sealed class SoundFx : IDisposable
             if (ratio >= 3) _jumps3++;
             if (ratio >= 4) _jumps4++;
         }
-        if (rms < 0.04 || ratio < JumpRatio) return;
+        // A sound out of silence (a game starting, a menu click after a pause) is no effect: the bed must be playing.
+        if (rms < 0.04 || ratio < JumpRatio || _slowBefore < 0.01) { _slowBefore = _slow; return; }
+        _slowBefore = _slow;
         long now = Environment.TickCount64;
         if (now - _talkTick < 1500) { _jumpsTalk++; return; } // speech or music: not an effect
         Fire(SoundKind.Impact, Math.Min(1, (ratio - JumpRatio) / 4 + 0.3), now);
