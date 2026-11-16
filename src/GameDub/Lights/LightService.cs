@@ -41,6 +41,7 @@ public sealed class LightService : IDisposable
     long _rxPrev = -1; int _rxHits; long _busyTick;
     long _lastInputTick; uint _lastPadPacket;
     long _heatTick;
+    string _demo = ""; long _demoUntil;
 
     public LightService()
     {
@@ -112,8 +113,37 @@ public sealed class LightService : IDisposable
 
             if (s.LightsHeat && now - _heatTick > 10_000) { _heatTick = now; _hot = Thermal.MaxCelsius() >= 85; }
             if (!s.LightsHeat) _hot = false;
+            Demo(now);
         }
         catch (Exception ex) { Log.Error("lights slow", ex); }
+    }
+
+    /// <summary>
+    /// Show one effect on request, for the owner to see them one by one: write its name to data\lights-demo.txt
+    /// (impact, siren, horn, battery, charge, download, downloaded, heat). The file is deleted when read.
+    /// </summary>
+    void Demo(long now)
+    {
+        string file = Path.Combine(Paths.Data, "lights-demo.txt");
+        if (File.Exists(file))
+        {
+            string name = "";
+            try { name = File.ReadAllText(file).Trim().ToLowerInvariant(); File.Delete(file); } catch { }
+            Log.Write("lights: demo " + name);
+            _demo = name; _demoUntil = now + 8000;
+            switch (name)
+            {
+                case "impact": OnSound(SoundKind.Impact, 1); break;
+                case "siren": OnSound(SoundKind.Siren, 1); break;
+                case "horn": OnSound(SoundKind.Horn, 1); break;
+                case "charge": _chargeFlashStart = now; break;
+                case "downloaded": _downloaded = true; break;
+            }
+        }
+        if (now >= _demoUntil) return;
+        if (_demo == "battery") _batteryLow = true;
+        if (_demo == "heat") _hot = true;
+        if (_demo == "download") _downloading = true;
     }
 
     /// <summary>30 times a second: the color of each stick. Only changes reach the device.</summary>
@@ -164,8 +194,9 @@ public sealed class LightService : IDisposable
             }
         }
         // 2. battery under 10 % and overheating: slow breathing for 3 s of every 20
-        if (_batteryLow && (now / 1000) % 20 < 3) { var c = Red.Scale(Breath(t, 3) * 0.8); return (c, c); }
-        if (_hot && (now / 1000) % 20 < 3) { var c = Orange.Scale(Breath(t, 3) * 0.7); return (c, c); }
+        bool cycle = (now / 1000) % 20 < 3 || now < _demoUntil; // a demo breathes all the time
+        if (_batteryLow && cycle) { var c = Red.Scale(Breath(t, 3) * 0.8); return (c, c); }
+        if (_hot && cycle) { var c = Orange.Scale(Breath(t, 3) * 0.7); return (c, c); }
         // 3. charger plugged in: one green flash
         if (_chargeFlashStart > 0 && now - _chargeFlashStart < 700) { var c = Green.Scale(1 - (now - _chargeFlashStart) / 700.0); return (c, c); }
         // 4. downloads: blue breathing while it runs, green when it is done (until he touches the console)
