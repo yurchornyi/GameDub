@@ -209,20 +209,105 @@ public sealed class ProcessMatcher
     }
 }
 
+/// <summary>
+/// Start with Windows, as a Task Scheduler task at this user's sign-in. Not the Run key: the Xbox full screen
+/// experience on the console starts no Run-key apps (no desktop shell), so after a restart the tray was missing and
+/// Armoury kept the stick lights (16.11). The task runs in both the full screen experience and the desktop.
+/// Older installs had the Run key: <see cref="Migrate"/> moves them. If the task cannot be made, the Run key stays,
+/// with Windows' own startup switch (Settings -> Apps -> Startup) turned on.
+/// </summary>
 public static class Autostart
 {
+    const string TaskName = "GameDub";
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    const string ApprovedKey = @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+    static bool? _task; // cached: asking Task Scheduler starts a process
 
-    public static bool IsEnabled()
+    public static bool IsEnabled() => HasTask() || (HasRunKey() && !OffInWindows());
+
+    /// <summary>The Run entry is there, but Windows' startup switch for it is off.</summary>
+    public static bool OffInWindows()
+    {
+        using var k = Registry.CurrentUser.OpenSubKey(ApprovedKey);
+        return k?.GetValue("GameDub") is byte[] b && b.Length > 0 && (b[0] & 1) == 1;
+    }
+
+    public static void Set(bool on)
+    {
+        if (!on) { Schtasks($"/delete /tn {TaskName} /f"); _task = false; RemoveRunKey(); return; }
+        if (MakeTask()) { RemoveRunKey(); return; }
+        // no task: the Run key, switched on in Windows too
+        using (var k = Registry.CurrentUser.CreateSubKey(RunKey)) k.SetValue("GameDub", $"\"{Paths.Exe}\" --tray");
+        if (OffInWindows())
+        {
+            using var a = Registry.CurrentUser.CreateSubKey(ApprovedKey);
+            a.SetValue("GameDub", new byte[12] { 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, RegistryValueKind.Binary);
+        }
+    }
+
+    /// <summary>At tray start: an old Run-key autostart becomes the sign-in task.</summary>
+    public static void Migrate()
+    {
+        if (!HasRunKey() || HasTask()) return;
+        if (MakeTask()) { RemoveRunKey(); Log.Write("autostart: moved from the Run key to a sign-in task"); }
+        else if (OffInWindows()) Log.Write("autostart is switched off in Windows (Settings -> Apps -> Startup): the tray will not start after a restart");
+    }
+
+    static bool HasRunKey()
     {
         using var k = Registry.CurrentUser.OpenSubKey(RunKey);
         return k?.GetValue("GameDub") is string;
     }
 
-    public static void Set(bool on)
+    static void RemoveRunKey()
     {
-        using var k = Registry.CurrentUser.CreateSubKey(RunKey);
-        if (on) k.SetValue("GameDub", $"\"{Paths.Exe}\" --tray");
-        else k.DeleteValue("GameDub", false);
+        using var k = Registry.CurrentUser.OpenSubKey(RunKey, true);
+        k?.DeleteValue("GameDub", false);
+    }
+
+    static bool HasTask() => _task ??= Schtasks($"/query /tn {TaskName}") == 0;
+
+    static bool MakeTask()
+    {
+        string user = System.Security.SecurityElement.Escape($@"{Environment.UserDomainName}\{Environment.UserName}");
+        string exe = System.Security.SecurityElement.Escape(Paths.Exe);
+        string xml = $"""
+            <?xml version="1.0" encoding="UTF-16"?>
+            <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+              <RegistrationInfo><Description>GameDub tray service: dubbing and the joystick lights</Description></RegistrationInfo>
+              <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger></Triggers>
+              <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+              <Settings>
+                <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+                <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+                <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+                <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+                <Priority>7</Priority>
+              </Settings>
+              <Actions Context="Author"><Exec><Command>{exe}</Command><Arguments>--tray</Arguments></Exec></Actions>
+            </Task>
+            """;
+        string file = Path.Combine(Path.GetTempPath(), "gamedub-task.xml");
+        try
+        {
+            File.WriteAllText(file, xml, System.Text.Encoding.Unicode);
+            bool ok = Schtasks($"/create /tn {TaskName} /xml \"{file}\" /f") == 0;
+            _task = ok;
+            if (!ok) Log.Write("autostart: could not make the sign-in task, using the Run key");
+            return ok;
+        }
+        finally { try { File.Delete(file); } catch { } }
+    }
+
+    static int Schtasks(string args)
+    {
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo("schtasks.exe", args)
+            { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true })!;
+            p.StandardOutput.ReadToEnd(); p.StandardError.ReadToEnd();
+            return p.WaitForExit(15_000) ? p.ExitCode : -1;
+        }
+        catch { return -1; }
     }
 }

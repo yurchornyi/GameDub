@@ -81,6 +81,7 @@ public sealed class TrayApp : ApplicationContext
         _timer.Start();
         Tick();
         Log.Write("tray started");
+        System.Threading.Tasks.Task.Run(Autostart.Migrate); // an old Run-key autostart: the full screen experience skips it
     }
 
     void Reload(bool force = false)
