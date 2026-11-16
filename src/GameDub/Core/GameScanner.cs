@@ -209,20 +209,41 @@ public sealed class ProcessMatcher
     }
 }
 
+/// <summary>
+/// Start with Windows: the Run key, plus Windows' own switch in Settings -> Apps -> Startup
+/// (StartupApproved; an odd first byte means off). That switch can be turned off behind our back: on the console
+/// GameDub and Edge were found off with no date (16.11), so the lights stayed with Armoury after a restart.
+/// </summary>
 public static class Autostart
 {
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    const string ApprovedKey = @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
 
     public static bool IsEnabled()
     {
         using var k = Registry.CurrentUser.OpenSubKey(RunKey);
-        return k?.GetValue("GameDub") is string;
+        return k?.GetValue("GameDub") is string && !OffInWindows();
+    }
+
+    /// <summary>The Run entry is there, but Windows' startup switch for it is off.</summary>
+    public static bool OffInWindows()
+    {
+        using var k = Registry.CurrentUser.OpenSubKey(ApprovedKey);
+        return k?.GetValue("GameDub") is byte[] b && b.Length > 0 && (b[0] & 1) == 1;
     }
 
     public static void Set(bool on)
     {
         using var k = Registry.CurrentUser.CreateSubKey(RunKey);
-        if (on) k.SetValue("GameDub", $"\"{Paths.Exe}\" --tray");
+        if (on)
+        {
+            k.SetValue("GameDub", $"\"{Paths.Exe}\" --tray");
+            if (OffInWindows())
+            {
+                using var a = Registry.CurrentUser.CreateSubKey(ApprovedKey);
+                a.SetValue("GameDub", new byte[12] { 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, RegistryValueKind.Binary);
+            }
+        }
         else k.DeleteValue("GameDub", false);
     }
 }
