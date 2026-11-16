@@ -48,6 +48,9 @@ public sealed class SoundFx : IDisposable
     int _blockN;
     long _lastEffectTick, _lastImpactTick, _lastSirenTick, _lastHornTick;
     double _lastImpactScore;
+    // what was heard, for the log: strongest effect scores and the loudest top class over 10 s
+    double _sumImpact, _sumSiren, _sumHorn; string _top = ""; double _topScore; int _hops; long _statTick;
+    string[] _names = Array.Empty<string>();
     double _peak;
 
     public static string ModelDir => Path.Combine(Paths.Root, "models", "yamnet");
@@ -59,6 +62,8 @@ public sealed class SoundFx : IDisposable
             .Select(l => l.Split(',', 3)).Where(p => p.Length == 3).Select(p => (i: int.Parse(p[0]), name: p[2].Trim().Trim('"'))).ToList();
         int[] Find(string[] wanted) => names.Where(n => wanted.Contains(n.name)).Select(n => n.i).ToArray();
         _impact = Find(ImpactNames); _siren = Find(SirenNames); _horn = Find(HornNames);
+        _names = new string[521];
+        foreach (var n in names) if (n.i >= 0 && n.i < 521) _names[n.i] = n.name;
 
         var opts = new SessionOptions { IntraOpNumThreads = 1, InterOpNumThreads = 1, ExecutionMode = ExecutionMode.ORT_SEQUENTIAL };
         _model = new InferenceSession(Path.Combine(ModelDir, "yamnet.onnx"), opts);
@@ -159,6 +164,7 @@ public sealed class SoundFx : IDisposable
             double Max(int[] idx) { double m = 0; for (int f = 0; f < frames; f++) foreach (var i in idx) m = Math.Max(m, scores[f, i]); return m; }
             double impact = Max(_impact), siren = Max(_siren), horn = Max(_horn);
             long now = Environment.TickCount64;
+            Stats(scores, frames, impact, siren, horn, now);
             if (impact > 0.2) { _lastImpactTick = now; _lastImpactScore = impact; }
             if (impact > 0.35) Fire(SoundKind.Impact, Math.Min(1, impact), now);
             if (siren > 0.4 && now - _lastSirenTick > 3000) { _lastSirenTick = now; Fire(SoundKind.Siren, siren, now); }
@@ -168,6 +174,20 @@ public sealed class SoundFx : IDisposable
         finally { Interlocked.Exchange(ref _busy, 0); }
     }
 
+    void Stats(Tensor<float> scores, int frames, double impact, double siren, double horn, long now)
+    {
+        _hops++;
+        _sumImpact = Math.Max(_sumImpact, impact); _sumSiren = Math.Max(_sumSiren, siren); _sumHorn = Math.Max(_sumHorn, horn);
+        for (int i = 0; i < 521; i++)
+        {
+            double v = 0; for (int f = 0; f < frames; f++) v = Math.Max(v, scores[f, i]);
+            if (v > _topScore) { _topScore = v; _top = _names[i] ?? i.ToString(); }
+        }
+        if (now - _statTick < 10_000) return;
+        Log.Write($"soundfx: {_hops} looks, max impact {_sumImpact:F2} siren {_sumSiren:F2} horn {_sumHorn:F2}, loudest «{_top}» {_topScore:F2}");
+        _statTick = now; _hops = 0; _sumImpact = _sumSiren = _sumHorn = _topScore = 0; _top = "";
+    }
+
     void Fire(SoundKind kind, double strength, long now)
     {
         if (kind == SoundKind.Impact)
@@ -175,6 +195,7 @@ public sealed class SoundFx : IDisposable
             if (now - _lastEffectTick < 700) return; // one flash per burst of gunfire, not a strobe
             _lastEffectTick = now;
         }
+        Log.Write($"soundfx: {kind} {strength:F2}");
         try { Effect?.Invoke(kind, strength); } catch (Exception ex) { Log.Error("soundfx effect", ex); }
     }
 
