@@ -154,16 +154,18 @@ public sealed class SoundFx : IDisposable
 
     double _phase; // resampler position in input samples
 
-    // A recording of what is heard (16 kHz mono float), for the test to replay: on while data\lights-record.txt exists,
-    // at most five minutes. Only for tuning on the console; nothing is recorded otherwise.
+    // Recordings of what is heard (16 kHz mono float), for the test to replay: on while data\lights-record.txt exists,
+    // one file per app in front (data\sound-rec-<exe>.raw), at most four minutes each. Only for tuning on the console;
+    // nothing is recorded otherwise.
     FileStream? _rec;
     long _recSamples;
+    string _recApp = "";
     static string RecordSwitch => Path.Combine(Paths.Data, "lights-record.txt");
     public static string RecordFile => Path.Combine(Paths.Data, "sound-rec.raw");
 
     void Record(List<float> mono)
     {
-        if (_rec == null || _recSamples > Rate * 300L) return;
+        if (_rec == null || _recSamples > Rate * 240L) return;
         var bytes = new byte[mono.Count * 4];
         for (int i = 0; i < mono.Count; i++) BitConverter.TryWriteBytes(bytes.AsSpan(i * 4), mono[i]);
         _rec.Write(bytes);
@@ -173,17 +175,27 @@ public sealed class SoundFx : IDisposable
     void RecordSwitchCheck()
     {
         bool want = File.Exists(RecordSwitch);
+        string app = "";
+        if (want)
+        {
+            var h = Native.GetForegroundWindow();
+            Native.GetWindowThreadProcessId(h, out uint pid);
+            app = Path.GetFileNameWithoutExtension(Native.GetProcessPath((int)pid) ?? "") ?? "";
+            if (app == "") app = "unknown";
+        }
         lock (_gate)
         {
+            if (_rec != null && (!want || app != _recApp))
+            {
+                Log.Write($"soundfx: recorded {_recSamples / (double)Rate:F0} s of {_recApp}");
+                _rec.Dispose(); _rec = null;
+            }
             if (want && _rec == null)
             {
-                _rec = new FileStream(RecordFile, FileMode.Create, FileAccess.Write, FileShare.Read); _recSamples = 0;
-                Log.Write("soundfx: recording to " + RecordFile);
-            }
-            else if (!want && _rec != null)
-            {
-                Log.Write($"soundfx: recorded {_recSamples / (double)Rate:F0} s");
-                _rec.Dispose(); _rec = null;
+                string file = Path.Combine(Paths.Data, $"sound-rec-{app}.raw");
+                _rec = new FileStream(file, FileMode.Append, FileAccess.Write, FileShare.Read);
+                _recSamples = _rec.Length / 4; _recApp = app;
+                Log.Write("soundfx: recording to " + file);
             }
         }
     }
