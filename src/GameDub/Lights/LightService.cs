@@ -29,9 +29,9 @@ public sealed class LightService : IDisposable
     // Every effect rises softly, holds, then fades on a curve that looks even to the eye, 30 frames a second.
     // Each effect has its own shape, so it reads even where colors look alike: one long pulse (impact), two blinks
     // (horn), two sharp strokes (thunder), a lub-dub (heartbeat), red and blue in turn (siren), slow breathing (states).
-    const int FrameMs = 33, SirenMs = 2400, SirenPeriod = 1200, HeartPeriod = 1000, HeartDub = 250, ThunderMs = 700, HornGap = 260, HornMs = HornGap + 350;
+    const int FrameMs = 33, SirenPeriod = 1200, HeartPeriod = 1000, HeartDub = 250, ThunderMs = 700, HornGap = 260, HornMs = HornGap + 350;
     static readonly Pulse ImpactPulse = new(120, 600, 900), HornBlink = new(40, 110, 200), ChargePulse = new(150, 600, 900),
-        SirenEnvelope = new(150, SirenMs - 550, 400), HeartBeat = new(60, 60, 220);
+        HeartBeat = new(60, 60, 220);
 
     /// <summary>Brightness 0..1 of a one-shot effect over time: smooth rise, hold, then a squared fall
     /// (LED light looks linear to the eye only on a curve; a straight fall seems to hang, then drop).</summary>
@@ -57,8 +57,8 @@ public sealed class LightService : IDisposable
 
     // one-shot effect
     long _fxStart; int _fxMs; SoundKind? _fx; double _fxStrength;
-    // a heartbeat heard in the game: beats from _heartStart until _heartUntil (the end of a beat)
-    long _heartStart, _heartUntil;
+    // a heartbeat or a siren heard in the game: runs from its start until its until (the end of a beat or a turn)
+    long _heartStart, _heartUntil, _sirenStart, _sirenUntil;
     // states
     volatile bool _downloading, _downloaded, _batteryLow, _hot, _skip, _charging, _docked;
     int _dockLogged = -1;
@@ -113,8 +113,15 @@ public sealed class LightService : IDisposable
                 _heartUntil = _heartStart + ((now + 1500 - _heartStart) / HeartPeriod + 1) * HeartPeriod;
                 return;
             }
+            if (kind == SoundKind.Siren)
+            {
+                // police lights on while the siren wails (at least two turns), then off at the end of a turn
+                if (now >= _sirenUntil) _sirenStart = now;
+                _sirenUntil = _sirenStart + ((now + SirenPeriod - _sirenStart) / SirenPeriod + 1) * SirenPeriod;
+                return;
+            }
             _fx = kind; _fxStrength = strength; _fxStart = now;
-            _fxMs = kind switch { SoundKind.Impact => ImpactPulse.Total, SoundKind.Siren => SirenMs, SoundKind.Thunder => ThunderMs, _ => HornMs };
+            _fxMs = kind switch { SoundKind.Impact => ImpactPulse.Total, SoundKind.Thunder => ThunderMs, _ => HornMs };
         }
     }
 
@@ -232,10 +239,6 @@ public sealed class LightService : IDisposable
                 case SoundKind.Impact:
                     var c = Rgb.Mix(idle, Orange.Scale(k), ImpactPulse.At(age));
                     return (c, c);
-                case SoundKind.Siren:
-                    // police lights: red on the left and blue on the right swell and ebb in turn
-                    double w = 0.5 - 0.5 * Math.Cos(2 * Math.PI * age / SirenPeriod), env = k * SirenEnvelope.At(age);
-                    return (Rgb.Mix(idle, Red, env * w * w), Rgb.Mix(idle, Blue, env * (1 - w) * (1 - w)));
                 case SoundKind.Thunder:
                     var z = Rgb.Mix(idle, Lightning.Scale(Math.Max(k, 0.8)), Strike(age));
                     return (z, z);
@@ -244,7 +247,15 @@ public sealed class LightService : IDisposable
                     return (h, h);
             }
         }
-        // 2. a heartbeat in the game (low health in many games): a dim red lub-dub once a second while it is heard
+        // 2. a siren or an alarm in the game: police lights, red on the left and blue on the right swell in turn
+        long ss, su; lock (_gate) { ss = _sirenStart; su = _sirenUntil; }
+        if (!dark && now < su)
+        {
+            long a = now - ss;
+            double w = 0.5 - 0.5 * Math.Cos(2 * Math.PI * a / SirenPeriod), env = Math.Clamp(Math.Min(a / 150.0, (su - now) / 400.0), 0, 1);
+            return (Rgb.Mix(idle, Red, env * w * w), Rgb.Mix(idle, Blue, env * (1 - w) * (1 - w)));
+        }
+        // 2b. a heartbeat in the game (low health in many games): a dim red lub-dub once a second while it is heard
         long hs, hu; lock (_gate) { hs = _heartStart; hu = _heartUntil; }
         if (!dark && now < hu)
         {

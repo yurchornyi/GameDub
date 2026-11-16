@@ -200,7 +200,7 @@ public sealed class SoundFx : IDisposable
             Stats(scores, frames, impact, siren, horn, heart, thunder, now);
             if (impact > 0.2) { _lastImpactTick = now; _lastImpactScore = impact; }
             if (impact > 0.35) Fire(SoundKind.Impact, Math.Min(1, impact), now);
-            if (siren > 0.4 && now - _lastSirenTick > 3000) { _lastSirenTick = now; Fire(SoundKind.Siren, siren, now); }
+            if (siren > 0.4) Fire(SoundKind.Siren, siren, now); // every look while it wails; the light runs on meanwhile
             if (horn > 0.4 && now - _lastHornTick > 1000) { _lastHornTick = now; Fire(SoundKind.Horn, horn, now); }
             if (heart > 0.3) Fire(SoundKind.Heartbeat, heart, now); // every look while it beats; the light keeps its own rhythm
             if (thunder > 0.35 && now - _lastThunderTick > 4000) { _lastThunderTick = now; Fire(SoundKind.Thunder, thunder, now); }
@@ -243,8 +243,11 @@ public sealed class SoundFx : IDisposable
             if (now - _lastEffectTick < 700) return; // one flash per burst of gunfire, not a strobe
             _lastEffectTick = now;
         }
-        if (kind != SoundKind.Heartbeat || now - _lastHeartTick > 2000) Log.Write($"soundfx: {kind} {strength:F2}");
-        if (kind == SoundKind.Heartbeat) _lastHeartTick = now;
+        // a heartbeat or a siren comes every look while it lasts: log only its start
+        ref long last = ref (kind == SoundKind.Siren ? ref _lastSirenTick : ref _lastHeartTick);
+        bool ongoing = kind is SoundKind.Heartbeat or SoundKind.Siren;
+        if (!ongoing || now - last > 2000) Log.Write($"soundfx: {kind} {strength:F2}");
+        if (ongoing) last = now;
         try { Effect?.Invoke(kind, strength); } catch (Exception ex) { Log.Error("soundfx effect", ex); }
     }
 
