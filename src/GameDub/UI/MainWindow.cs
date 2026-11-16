@@ -295,6 +295,8 @@ public sealed class MainWindow : Window
         list.Children.Add(Number("Гучність", () => _s.Volume, v => _s.Volume = v, 10, 100, 10, v => v + " %"));
         list.Children.Add(ActionRow("Перевірити голоси", "▶", TestVoices));
         list.Children.Add(Toggle("Автозапуск служби з Windows", Autostart.IsEnabled, Autostart.Set));
+        list.Children.Add(Toggle("Тихі лаунчери", () => _s.QuietLaunchers, v => { _s.QuietLaunchers = v; SaveSettings(); },
+            "Epic, Ubisoft, Rockstar, EA, Battle.net, GOG: не стартують із Windows, не вискакують поверх гри, закриваються після неї · Steam не чіпає"));
         list.Children.Add(Info("Пауза перекладу (кнопка M1)", KeyNames(_s.HotkeyPause)));
         list.Children.Add(Info("Перевибір області (кнопка M2)", KeyNames(_s.HotkeyRegion)));
 
