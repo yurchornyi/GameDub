@@ -155,6 +155,26 @@ public sealed class SoundFx : IDisposable
 
     double _phase; // resampler position in input samples
 
+    void Feed(byte[] buf, int bytes, WaveFormat fmt)
+    {
+        if (fmt.Encoding != WaveFormatEncoding.IeeeFloat && fmt.Encoding != WaveFormatEncoding.Extensible) return;
+        if (fmt.BitsPerSample != 32) return;
+        int ch = fmt.Channels, frames = bytes / 4 / ch;
+        double step = fmt.SampleRate / (double)Rate;
+        int avg = Math.Max(1, (int)Math.Round(step)); // box filter over one output period against aliasing
+        var mono = new List<float>(frames / Math.Max(1, (int)step) + 2);
+        for (; _phase < frames; _phase += step)
+        {
+            int start = (int)_phase;
+            double sum = 0; int n = 0;
+            for (int k = start; k < start + avg && k < frames; k++, n++)
+                for (int c = 0; c < ch; c++) sum += BitConverter.ToSingle(buf, (k * ch + c) * 4);
+            mono.Add(n == 0 ? 0 : (float)(sum / (n * ch)));
+        }
+        _phase -= frames;
+        Push(mono);
+    }
+
     /// <summary>16 kHz mono samples from the loopback.</summary>
     void Push(List<float> mono)
     {
