@@ -80,7 +80,7 @@ public sealed class AppSettings
     public bool LightsOn { get; set; } = true;
     public bool LightsSound { get; set; } = true;      // flashes on sound effects only (explosions, shots, sirens, horns)
     public bool LightsDownload { get; set; } = true;   // blue while a game downloads, green when done
-    public bool LightsCharging { get; set; } = false;   // one green flash when the charger is plugged in
+    public bool LightsBattery { get; set; } = true;     // red breathing under 10 %, a green flash on the charger (owner: on)
     public bool LightsHeat { get; set; } = false;      // orange breathing at 85 °C and above
     public bool LightsRumble { get; set; } = false;    // a short rumble on explosions and crashes, for games without their own
     public int LightsBase { get; set; } = 0;           // idle glow brightness, %; 0 = dark until an event (owner, 16.11)
