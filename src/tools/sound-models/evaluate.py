@@ -103,47 +103,64 @@ AS_CAP = {"vehicle": 200, "music": 80, "speech": 80, "other": 200, "siren, alarm
 
 
 def fetch_audioset(root):
+    """The AudioSet eval set, listed 100 rows at a time. Each page's clips are downloaded at once (their links expire),
+    and the progress is saved after each page, so a run that stops is continued by the next one from the cache."""
     d = os.path.join(root, "audioset")
     os.makedirs(d, exist_ok=True)
-    sel_path = os.path.join(d, "selection.json")
-    if os.path.exists(sel_path):
-        sel = json.load(open(sel_path))
-        if all(os.path.exists(os.path.join(d, s["file"])) for s in sel):
-            return [(os.path.join(d, s["file"]), "as: " + s["group"]) for s in sel]
-    rows, off, total = [], 0, None
-    while total is None or off < total:
-        j = get("https://datasets-server.huggingface.co/rows?dataset=agkphysics/AudioSet&config=balanced"
-                f"&split=test&offset={off}&length=100").json()
-        total = j["num_rows_total"]
-        for r in j["rows"]:
-            x = r["row"]
-            rows.append({"id": x["video_id"], "labels": x["human_labels"], "url": x["audio"][0]["src"]})
-        off += 100
-    print(f"audioset: {len(rows)} clips listed")
-    random.Random(7).shuffle(rows)
-    taken, sel = {}, []
-    for r in rows:
-        g = as_group(r["labels"])
-        if taken.get(g, 0) >= AS_CAP.get(g, 10**9):
-            continue
-        taken[g] = taken.get(g, 0) + 1
-        sel.append({"group": g, "labels": r["labels"], "file": r["id"] + ".flac", "url": r["url"]})
-    print("audioset groups:", taken)
+    st_path = os.path.join(d, "progress.json")
+    st = json.load(open(st_path)) if os.path.exists(st_path) else {"offset": 0, "total": None, "sel": [], "lost": 0}
+    taken = {}
+    for s_ in st["sel"]:
+        taken[s_["group"]] = taken.get(s_["group"], 0) + 1
 
-    def dl(s):
-        p = os.path.join(d, s["file"])
+    def dl(s_):
+        p = os.path.join(d, s_["file"])
         if not os.path.exists(p):
             try:
-                open(p, "wb").write(get(s["url"]).content)
+                open(p, "wb").write(get(s_["url"]).content)
             except Exception as e:
-                print("audioset: skip", s["file"], e)
+                print("audioset: skip", s_["file"], e)
                 return None
-        return s
+        return s_
 
+    t0 = time.time()
     with ThreadPoolExecutor(8) as ex:
-        sel = [s for s in ex.map(dl, sel) if s]
-    json.dump([{k: v for k, v in s.items() if k != "url"} for s in sel], open(sel_path, "w"))
-    return [(os.path.join(d, s["file"]), "as: " + s["group"]) for s in sel]
+        while st["total"] is None or st["offset"] < st["total"]:
+            try:
+                j = get("https://datasets-server.huggingface.co/rows?dataset=agkphysics/AudioSet&config=balanced"
+                        f"&split=test&offset={st['offset']}&length=100", tries=10).json()
+            except Exception as e:
+                if st["total"] is None:
+                    raise
+                # the server keeps failing on this page: 100 of ~20000 clips are not worth the run
+                print(f"audioset: page {st['offset']} lost ({e})", flush=True)
+                st["lost"] += 1
+                st["offset"] += 100
+                continue
+            st["total"] = j["num_rows_total"]
+            page = []
+            for r in j["rows"]:
+                x = r["row"]
+                g = as_group(x["human_labels"])
+                if taken.get(g, 0) >= AS_CAP.get(g, 10**9):
+                    continue
+                taken[g] = taken.get(g, 0) + 1
+                page.append({"group": g, "labels": x["human_labels"], "file": x["video_id"] + ".flac",
+                             "url": x["audio"][0]["src"]})
+            for s_ in page:
+                taken[s_["group"]] -= 1
+            for s_ in ex.map(dl, page):
+                if s_:
+                    taken[s_["group"]] += 1
+                    st["sel"].append({k: v for k, v in s_.items() if k != "url"})
+            st["offset"] += 100
+            json.dump(st, open(st_path + ".tmp", "w"))
+            os.replace(st_path + ".tmp", st_path)
+            if st["offset"] % 2000 == 0:
+                print(f"audioset: {st['offset']}/{st['total']} listed, {len(st['sel'])} kept, "
+                      f"{time.time() - t0:.0f} s", flush=True)
+    print(f"audioset: {len(st['sel'])} clips, {st['lost']} pages lost, groups {taken}")
+    return [(os.path.join(d, s_["file"]), "as: " + s_["group"]) for s_ in st["sel"]]
 
 
 def fetch_esc50(root):
@@ -291,7 +308,7 @@ def init_worker(models_dir, yam_dir, clap_keys):
     y = sess(os.path.join(yam_dir, "yamnet.onnx"))
     M["yamnet"] = (y, y.get_inputs()[0].name, [o.name for o in y.get_outputs() if o.shape and o.shape[-1] == 521][0])
     M["eat_models"] = []
-    for m in ("mn10", "dymn10"):
+    for m in ("mn10",):
         p = os.path.join(models_dir, f"efficientat-{m}_as.onnx")
         if os.path.exists(p):
             M[m] = sess(p)
@@ -525,8 +542,7 @@ def report(recs, export, out):
 
     # 1. today's YAMNet against EfficientAT at the same thresholds
     have = {k for r in recs[:50] for j in r["pipes"]["eat"]["onsets"] for k in j}
-    pipes = [p for p in [("yamnet", "yamnet", None), ("mn10", "mn10", None), ("mn10, 0.5 s cut", "mn10", "mn10_w500"),
-                         ("dymn10", "dymn10", None)] if p[1] == "yamnet" or p[1] in have]
+    pipes = [p for p in [("yamnet", "yamnet", None), ("mn10", "mn10", None), ("mn10, 0.5 s cut", "mn10", "mn10_w500")] if p[1] == "yamnet" or p[1] in have]
     for what in ("shot", "blast", "siren", "horn"):
         L += [f"## {what}: same thresholds as today", "", "| group | " + " | ".join(p[0] for p in pipes) + " |",
               "|---|" + "---|" * len(pipes)]
@@ -601,6 +617,7 @@ def main():
     a = ap.parse_args()
     clips = fetch_audioset(a.data) + fetch_esc50(a.data) + fetch_sfx(a.data)
     print(f"{len(clips)} clips")
+    open(os.path.join(a.data, "complete"), "w").close()  # all sounds are here: the workflow stops saving them
     per, jobs = {}, []
     for p, g in clips:
         do = bool(CLAP_GROUPS.match(g)) and per.get(g, 0) < CLAP_CAP.get(g, 10**9)

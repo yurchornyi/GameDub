@@ -33,19 +33,21 @@ jobs:
           mkdir -p work/yamnet
           curl -sfL https://huggingface.co/zeropointnine/yamnet-onnx/resolve/main/yamnet.onnx -o work/yamnet/yamnet.onnx
           curl -sfL https://huggingface.co/zeropointnine/yamnet-onnx/resolve/main/yamnet_class_map.csv -o work/yamnet/yamnet_class_map.csv
-      - id: data
-        uses: actions/cache/restore@v4
+      # the sounds take ~30 min to download: each run keeps what it got, and the next one goes on from the newest
+      - uses: actions/cache/restore@v4
         with:
           path: work/data
-          key: sound-eval-data-v1
+          key: sound-eval-data-v2-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: sound-eval-data-v2-
+      - id: data
+        run: echo "complete=$([ -f work/data/complete ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
       - name: Evaluate
         run: python src/tools/sound-models/evaluate.py --models work/models --yamnet work/yamnet --data work/data --report work/report.md --scores work/scores.json.gz
-      # the sounds are kept even when a later step fails, so a rerun does not download them again
       - uses: actions/cache/save@v4
-        if: always() && steps.data.outputs.cache-hit != 'true'
+        if: always() && steps.data.outputs.complete != 'yes'
         with:
           path: work/data
-          key: sound-eval-data-v1
+          key: sound-eval-data-v2-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Report
         if: always()
         run: if [ -f work/report.md ]; then cat work/report.md >> "$GITHUB_STEP_SUMMARY"; fi
