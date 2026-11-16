@@ -36,7 +36,7 @@ public enum SoundKind { Impact, Siren, Horn, Heartbeat, Thunder, Shot }
 public sealed class SoundFx : IDisposable
 {
     const int Rate = 16000, Window = 15600, HopMs = 480, Block = Rate / 100;
-    const int PreSamples = Rate * 40 / 1000, PostSamples = Rate * 60 / 1000; // the cut around an onset (the dump test)
+    const int PostSamples = Rate * 60 / 1000; // a sudden sound is judged 60 ms after its onset
     const int OnsetGap = Rate * 60 / 1000;  // a fast gun fires 10-15 times a second
     const int StaleMs = 250;                // a cut the model reaches later than this is dropped: late is worse than missed
     // Real hits only: "Slam", "Thump, thud" and "Burst, pop" also name doors, footsteps and bubbles
@@ -45,7 +45,6 @@ public sealed class SoundFx : IDisposable
     static readonly string[] GunNames = { "Gunshot, gunfire", "Machine gun", "Fusillade", "Artillery fire", "Cap gun" };
     static readonly string[] FootNames = { "Walk, footsteps", "Run", "Shuffle" };
     const double GunScore = 0.2, ShotLoudness = 0.35, ImpactScore = 0.35, ThunderScore = 0.35, SirenScore = 0.3, SirenKeep = 0.25;
-    const int Fade = Rate * 5 / 1000;       // each repeat of a cut fades in and out, or the seams click like shots
     static readonly string[] SirenNames = { "Siren", "Civil defense siren", "Police car (siren)", "Ambulance (siren)", "Fire engine, fire truck (siren)",
         "Alarm", "Car alarm", "Smoke detector, smoke alarm", "Fire alarm" };
     static readonly string[] HornNames = { "Vehicle horn, car horn, honking", "Air horn, truck horn", "Train horn", "Foghorn" };
@@ -78,7 +77,7 @@ public sealed class SoundFx : IDisposable
     long _lastOnset = long.MinValue / 2;
     readonly List<(long at, double rms)> _onsets = new();      // onsets waiting for their 100 ms after
     // cuts waiting for the model, on a thread of their own
-    readonly Queue<(float[] clip, float[] around, double rms, long tick)> _cuts = new();
+    readonly Queue<(float[] around, double rms, long tick)> _cuts = new();
     readonly SemaphoreSlim _cutReady = new(0);
     readonly Thread _judge;
     volatile bool _stop;
@@ -156,141 +155,10 @@ public sealed class SoundFx : IDisposable
 
     double _phase; // resampler position in input samples
 
-    // Recordings of what is heard (16 kHz mono float), for the test to replay: on while data\lights-record.txt exists,
-    // one file per app in front (data\sound-rec-<exe>.raw), at most four minutes each. Only for tuning on the console;
-    // nothing is recorded otherwise.
-    FileStream? _rec;
-    long _recSamples;
-    string _recApp = "";
-    static string RecordSwitch => Path.Combine(Paths.Data, "lights-record.txt");
-    public static string RecordFile => Path.Combine(Paths.Data, "sound-rec.raw");
-
-    void Record(List<float> mono)
-    {
-        if (_rec == null || _recSamples > Rate * 240L) return;
-        var bytes = new byte[mono.Count * 4];
-        for (int i = 0; i < mono.Count; i++) BitConverter.TryWriteBytes(bytes.AsSpan(i * 4), mono[i]);
-        _rec.Write(bytes);
-        _recSamples += mono.Count;
-    }
-
-    void RecordSwitchCheck()
-    {
-        bool want = File.Exists(RecordSwitch);
-        string app = "";
-        if (want)
-        {
-            var h = Native.GetForegroundWindow();
-            Native.GetWindowThreadProcessId(h, out uint pid);
-            app = Path.GetFileNameWithoutExtension(Native.GetProcessPath((int)pid) ?? "") ?? "";
-            if (app == "") app = "unknown";
-        }
-        lock (_gate)
-        {
-            if (_rec != null && (!want || app != _recApp))
-            {
-                Log.Write($"soundfx: recorded {_recSamples / (double)Rate:F0} s of {_recApp}");
-                _rec.Dispose(); _rec = null;
-            }
-            if (want && _rec == null)
-            {
-                string file = Path.Combine(Paths.Data, $"sound-rec-{app}.raw");
-                _rec = new FileStream(file, FileMode.Append, FileAccess.Write, FileShare.Read);
-                _recSamples = _rec.Length / 4; _recApp = app;
-                Log.Write("soundfx: recording to " + file);
-            }
-        }
-    }
-
-    /// <summary>
-    /// The tuning test: every onset of a recording (the same onset rule as live) and a look every 240 ms, with the
-    /// model's scores over several windows, as CSV. Offline, as fast as the model goes.
-    /// </summary>
-    public void Dump(string rawPath, TextWriter csv)
-    {
-        var bytes = File.ReadAllBytes(rawPath);
-        var all = new float[bytes.Length / 4];
-        for (int i = 0; i < all.Length; i++) all[i] = BitConverter.ToSingle(bytes, i * 4);
-        float[] Real(long end)
-        {
-            var w = new float[Window];
-            for (int k = 0; k < Window; k++) { long j = end - Window + k; w[k] = j >= 0 && j < all.Length ? all[j] : 0; }
-            return w;
-        }
-        float[] Tiled(long at)
-        {
-            var clip = new float[PreSamples + PostSamples];
-            for (int k = 0; k < clip.Length; k++) { long j = at - PreSamples + k; clip[k] = j >= 0 && j < all.Length ? all[j] : 0; }
-            var w = new float[Window];
-            for (int i = 0; i < Window; i++)
-            {
-                int k = i % clip.Length;
-                double edge = Math.Min(1, Math.Min(k, clip.Length - 1 - k) / (double)Fade);
-                w[i] = (float)(clip[k] * edge);
-            }
-            return w;
-        }
-        string Cols(Heard h) => $"{h.Max(_gun):F3},{h.Max(_impact):F3},{h.Max(_foot):F3},{h.Max(_siren):F3},{h.Max(_horn):F3},{h.Max(_engine):F3},\"{_names[h.Top()]}\"";
-        string Head(string w) => $"{w}_gun,{w}_impact,{w}_foot,{w}_siren,{w}_horn,{w}_engine,{w}_top";
-        csv.WriteLine("kind,t,rms," + string.Join(",", new[] { "before", "a60", "a100", "a150", "center", "tiled" }.Select(Head)));
-        // onsets, as Gate finds them
-        var recent = new double[5]; int rn = 0; long last = long.MinValue / 2;
-        for (long b = 0; b + Block <= all.Length; b += Block)
-        {
-            double sum = 0; for (long j = b; j < b + Block; j++) sum += all[j] * all[j];
-            double rms = Math.Sqrt(sum / Block), before = recent.Average();
-            recent[rn++ % recent.Length] = rms;
-            if (rms < 0.01 || rms < 1.8 * before || b + Block - last < OnsetGap) continue;
-            last = b + Block;
-            csv.WriteLine($"onset,{b / (double)Rate:F3},{rms:F4}," + string.Join(",",
-                Cols(Scores(Real(b))), Cols(Scores(Real(b + Rate * 60 / 1000))), Cols(Scores(Real(b + Rate * 100 / 1000))),
-                Cols(Scores(Real(b + Rate * 150 / 1000))), Cols(Scores(Real(b + Window / 2))), Cols(Scores(Tiled(b)))));
-        }
-        for (long end = Window; end <= all.Length; end += Rate * 240 / 1000)
-            csv.WriteLine($"look,{end / (double)Rate:F3},0," + Cols(Scores(Real(end))));
-    }
-
-    /// <summary>The test: plays a recording through the same path in real time (so every timing rule holds).</summary>
-    public void Replay(string rawPath)
-    {
-        var data = File.ReadAllBytes(rawPath);
-        int total = data.Length / 4, chunk = Rate / 100;
-        var t0 = System.Diagnostics.Stopwatch.StartNew();
-        for (int at = 0; at < total; at += chunk)
-        {
-            var mono = new List<float>(chunk);
-            for (int i = at; i < Math.Min(total, at + chunk); i++) mono.Add(BitConverter.ToSingle(data, i * 4));
-            Push(mono);
-            int due = (int)((at + chunk) * 1000L / Rate - t0.ElapsedMilliseconds);
-            if (due > 0) Thread.Sleep(due);
-        }
-        Thread.Sleep(600);
-    }
-
-    void Feed(byte[] buf, int bytes, WaveFormat fmt)
-    {
-        if (fmt.Encoding != WaveFormatEncoding.IeeeFloat && fmt.Encoding != WaveFormatEncoding.Extensible) return;
-        if (fmt.BitsPerSample != 32) return;
-        int ch = fmt.Channels, frames = bytes / 4 / ch;
-        double step = fmt.SampleRate / (double)Rate;
-        int avg = Math.Max(1, (int)Math.Round(step)); // box filter over one output period against aliasing
-        var mono = new List<float>(frames / Math.Max(1, (int)step) + 2);
-        for (; _phase < frames; _phase += step)
-        {
-            int start = (int)_phase;
-            double sum = 0; int n = 0;
-            for (int k = start; k < start + avg && k < frames; k++, n++)
-                for (int c = 0; c < ch; c++) sum += BitConverter.ToSingle(buf, (k * ch + c) * 4);
-            mono.Add(n == 0 ? 0 : (float)(sum / (n * ch)));
-        }
-        _phase -= frames;
-        Push(mono);
-    }
-
-    /// <summary>16 kHz mono samples, from the loopback or a recording replayed by the test.</summary>
+    /// <summary>16 kHz mono samples from the loopback.</summary>
     void Push(List<float> mono)
     {
-        List<(float[] clip, float[] around, double rms)>? ready = null;
+        List<(float[] around, double rms)>? ready = null;
         lock (_gate)
         {
             foreach (float v in mono)
@@ -300,22 +168,19 @@ public sealed class SoundFx : IDisposable
                 _samples++;
                 Gate(v);
             }
-            Record(mono);
             // onsets whose 100 ms after have come: cut them out for the model
             while (_onsets.Count > 0 && _samples - _onsets[0].at >= PostSamples)
             {
                 var (at, rms) = _onsets[0];
                 _onsets.RemoveAt(0);
-                long from = at - PreSamples;
-                if (Paused || _samples - from > _ring.Length) continue;
-                var clip = Array.Empty<float>();
+                if (Paused) continue;
                 var around = new float[Window];                       // the second that ends 60 ms after the onset
                 int aStart = (_write - Window + _ring.Length) % _ring.Length;
                 for (int k = 0; k < Window; k++) around[k] = _ring[(aStart + k) % _ring.Length];
-                (ready ??= new()).Add((clip, around, rms));
+                (ready ??= new()).Add((around, rms));
             }
         }
-        if (ready != null) foreach (var (clip, around, rms) in ready) Hand(clip, around, rms);
+        if (ready != null) foreach (var (around, rms) in ready) Hand(around, rms);
     }
 
     /// <summary>Every 10 ms block: the loudness for the silence gate, and an onset, a jump to 1.8 times the last 50 ms.</summary>
@@ -336,7 +201,7 @@ public sealed class SoundFx : IDisposable
 
     /// <summary>A cut for the model. While the model is behind in fast fire, a sound as loud as the shot it named just
     /// before is the next shot, so a burst keeps flashing shot by shot.</summary>
-    void Hand(float[] clip, float[] around, double rms)
+    void Hand(float[] around, double rms)
     {
         long now = Environment.TickCount64;
         bool fast = false;
@@ -347,7 +212,7 @@ public sealed class SoundFx : IDisposable
             if (!fast)
             {
                 if (_cuts.Count >= 4) { _cuts.Dequeue(); _late++; }
-                _cuts.Enqueue((clip, around, rms, now));
+                _cuts.Enqueue((around, rms, now));
             }
         }
         if (fast) { _fast++; Shoot(rms, now); }
@@ -359,7 +224,7 @@ public sealed class SoundFx : IDisposable
         while (!_stop)
         {
             _cutReady.Wait(1000);
-            (float[] clip, float[] around, double rms, long tick) cut;  // clip: unused, kept for the queue's shape
+            (float[] around, double rms, long tick) cut;
             lock (_cuts)
             {
                 if (_cuts.Count == 0) continue;
@@ -394,15 +259,10 @@ public sealed class SoundFx : IDisposable
             string name = _names[top] ?? top.ToString();
             _clipTops[name] = _clipTops.TryGetValue(name, out int n) ? n + 1 : 1;
         }
-        if (Lab) Log.Write($"soundfx lab: rms {rms:F3} «{_names[top]}» gun {gun:F2} impact {impact:F2} foot {foot:F2}" +
-            (shot ? " -> SHOT" : blast ? " -> BLAST" : clap ? " -> THUNDER" : ""));
         if (shot) Shoot(rms, now);
         else if (blast) { _impacts++; Fire(SoundKind.Impact, impact, ImpactScore, now); }
         else if (clap && now - _lastThunderTick > 4000) { _lastThunderTick = now; Fire(SoundKind.Thunder, thunder, ThunderScore, now); }
     }
-
-    /// <summary>A judging session's log of every cut, while data\lights-lab.txt exists (for tuning on the console).</summary>
-    static bool Lab => File.Exists(Path.Combine(Paths.Data, "lights-lab.txt"));
 
     /// <summary>The model's scores over one window, each class at its strongest frame.</summary>
     sealed class Heard
@@ -438,7 +298,6 @@ public sealed class SoundFx : IDisposable
 
     void Classify()
     {
-        try { RecordSwitchCheck(); } catch (Exception ex) { Log.Error("soundfx record", ex); }
         if (Paused || Interlocked.Exchange(ref _busy, 1) == 1) return;
         try
         {
@@ -524,7 +383,6 @@ public sealed class SoundFx : IDisposable
         _stop = true;
         _cutReady.Release();
         _judge.Join(2000);
-        lock (_gate) { _rec?.Dispose(); _rec = null; }
         _model.Dispose();
     }
 }

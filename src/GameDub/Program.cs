@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -84,33 +83,6 @@ public static class Program
                 fx.Effect += (k, st) => { lock (o) o.AppendLine($"{(DateTime.Now - t0).TotalSeconds,6:F1} s  {k}  {st:F2}"); };
                 fx.FollowDefaultDevice();
                 Thread.Sleep(secs * 1000);
-                break;
-            }
-            case "sounds":
-            {
-                // --test sounds [recording]: replays a recording (data\sound-rec.raw) through the sound effects in real time
-                string raw = a.Length > 1 ? a[1] : Lights.SoundFx.RecordFile;
-                using var fx = new Lights.SoundFx();
-                var t0 = DateTime.Now;
-                var count = new Dictionary<Lights.SoundKind, int>();
-                fx.Effect += (k, st) => { lock (o) { o.AppendLine($"{(DateTime.Now - t0).TotalSeconds,6:F2} s  {k}  {st:F2}"); count[k] = count.GetValueOrDefault(k) + 1; } };
-                fx.Replay(raw);
-                lock (o) o.AppendLine("total: " + string.Join(", ", count.Select(c => $"{c.Key} {c.Value}")));
-                break;
-            }
-            case "sounds-dump":
-            {
-                // --test sounds-dump: every recording (data\sound-rec-*.raw, 10 s and longer) to data\dump-<name>.csv
-                using var fx = new Lights.SoundFx();
-                Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture; // dots in the CSV
-                foreach (var raw in Directory.GetFiles(Paths.Data, "sound-rec-*.raw").Where(f => new FileInfo(f).Length >= 16000 * 4 * 10))
-                {
-                    string name = Path.GetFileNameWithoutExtension(raw)["sound-rec-".Length..];
-                    using var w = new StreamWriter(Path.Combine(Paths.Data, $"dump-{name}.csv"));
-                    var t0 = DateTime.Now;
-                    fx.Dump(raw, w);
-                    o.AppendLine($"{name}: {(DateTime.Now - t0).TotalSeconds:F0} s");
-                }
                 break;
             }
             case "running":
