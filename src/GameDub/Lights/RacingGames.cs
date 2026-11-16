@@ -11,20 +11,23 @@ namespace GameDub.Lights;
 
 /// <summary>
 /// Whether the game in front is a racing game, where the left trigger is the brake. An engine heard is not enough: in
-/// Call of Duty a helicopter sounded like one and aiming with the left trigger lit the brake (16.11). The genre comes
-/// from the game's Steam store page ("Racing", genre 9): the game's folder under steamapps\common gives its app id
-/// through the library's appmanifest files, and the genres are asked once per game from store.steampowered.com (only
-/// the app id is sent), then kept in data\genres.json. A game not from Steam, or not answered yet, is not a racing game.
+/// Call of Duty a helicopter sounded like one and aiming with the left trigger lit the brake (16.11). A pure racing game:
+/// its Steam store genres have "Racing" (9) and not "Adventure" (25). Open-world games where you also walk and aim with
+/// the left trigger are "Racing" too on Steam (GTA 5 Enhanced: Action, Adventure, Racing; aiming lit the brake, 16.11),
+/// so they are left out. Forza Horizon is "Adventure" as well: its brake comes from its own telemetry. The game's folder
+/// under steamapps\common gives its app id through the library's appmanifest files; the genres are asked once per game
+/// from store.steampowered.com (only the app id is sent) and kept in data\racing-games.json. A game not from Steam, or
+/// not answered yet, is not a racing game.
 /// </summary>
 static class RacingGames
 {
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
     static readonly object Gate = new();
-    static Dictionary<string, bool>? _racing;                 // app id -> racing, as in genres.json
+    static Dictionary<string, bool>? _racing;                 // app id -> racing, as in racing-games.json
     static readonly Dictionary<string, string?> _appOf = new(StringComparer.OrdinalIgnoreCase); // game folder -> app id
     static readonly Dictionary<string, long> _asked = new();  // app id -> when asked last (a failure waits 10 min)
 
-    static string GenresFile => Path.Combine(Paths.Data, "genres.json");
+    static string GenresFile => Path.Combine(Paths.Data, "racing-games.json");
 
     /// <summary>Cheap to call every second: dictionary lookups, a file read once per game folder.</summary>
     public static bool IsRacing(string? exePath)
@@ -89,8 +92,10 @@ static class RacingGames
             string json = await Http.GetStringAsync($"https://store.steampowered.com/api/appdetails?appids={app}&filters=genres");
             using var doc = JsonDocument.Parse(json);
             if (!doc.RootElement.TryGetProperty(app, out var entry) || !entry.TryGetProperty("success", out var ok) || !ok.GetBoolean()) return;
-            bool racing = entry.TryGetProperty("data", out var data) && data.TryGetProperty("genres", out var genres) &&
-                genres.EnumerateArray().Any(g => g.TryGetProperty("id", out var id) && id.ToString() == "9");
+            var ids = entry.TryGetProperty("data", out var data) && data.TryGetProperty("genres", out var genres)
+                ? genres.EnumerateArray().Select(g => g.TryGetProperty("id", out var id) ? id.ToString() : "").ToHashSet()
+                : new HashSet<string>();
+            bool racing = ids.Contains("9") && !ids.Contains("25");
             lock (Gate)
             {
                 _racing ??= Load();
@@ -105,7 +110,7 @@ static class RacingGames
     static Dictionary<string, bool> Load()
     {
         try { if (File.Exists(GenresFile)) return JsonSerializer.Deserialize<Dictionary<string, bool>>(File.ReadAllText(GenresFile)) ?? new(); }
-        catch (Exception ex) { Log.Error("racing games: genres.json", ex); }
+        catch (Exception ex) { Log.Error("racing games: racing-games.json", ex); }
         return new();
     }
 }

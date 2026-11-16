@@ -19,22 +19,24 @@ public enum SoundKind { Impact, Siren, Horn, Heartbeat, Thunder, Shot }
 /// sound effects only: explosions, shots, crashes and breaking glass, sirens and alarms, horns, a heartbeat (low health
 /// in many games) and thunder. Speech and music are ignored. YAMNet (Google, AudioSet, 521 classes) names the sounds,
 /// in two ways:
-/// - Sudden sounds (shots, explosions, crashes, breaking glass, a thunder clap) are judged one by one, at once. Every
-///   sharp onset (a jump in loudness between 10 ms blocks) is cut out, 40 ms before to 100 ms after, and the model is
-///   asked twice: about the cut repeated over its whole one-second window (what is this one sound? the model averages
-///   over its window, so a cut alone in silence read as "Silence", 16.11), and about the last second as it sounded
-///   (is there gunfire or a blast around at all?). Both must agree. So a shot flashes about 0.1 s after it is heard,
-///   each shot of a burst on its own, as bright as it is loud; and a footstep, a reload or a menu click names itself as
-///   what it is and flashes nothing (16.11, Call of Duty: looks twice a second were up to a second late, and onsets
-///   taken while gunfire went on flashed on footsteps).
-/// - Lasting sounds (sirens, horns, a heartbeat, an engine) are looked at twice a second over the last second.
+/// - Sudden sounds (shots, explosions, crashes, breaking glass, a thunder clap) are judged one by one, at once: 60 ms
+///   after every sharp onset (a jump in loudness between 10 ms blocks) the model is asked about the second that ends
+///   there. A shot needs gunfire over 0.2, more than any blast or footsteps, and a loudness of at least a third of the
+///   loudest shot lately, so a footstep amid a fight stays dark. Tuned on recordings of Call of Duty, GTA 5 and
+///   Wreckfest (16.11): shots flash about 0.07 s after they are heard, each shot of a burst on its own; footsteps,
+///   speech and music do not; a race flashes no shots. Tried and dropped: looks twice a second (up to a second late),
+///   a cut alone in silence (the model averages over its second: "Silence"), a cut repeated over the second
+///   (footsteps then read as gunfire).
+/// - Lasting sounds (sirens, horns, a heartbeat, an engine) are looked at twice a second over the last second. A siren
+///   is shown only once two looks in a row hear it, and kept while it is heard within 2.5 s: in GTA 5 the model heard
+///   police sirens on and off, and the lights flickered.
 /// A loudness detector without the model was tried for crashes (16.11) and dropped: it flashed on starts, menus and
 /// gear shifts in Wreckfest.
 /// </summary>
 public sealed class SoundFx : IDisposable
 {
     const int Rate = 16000, Window = 15600, HopMs = 480, Block = Rate / 100;
-    const int PreSamples = Rate * 40 / 1000, PostSamples = Rate * 100 / 1000; // the cut around an onset
+    const int PreSamples = Rate * 40 / 1000, PostSamples = Rate * 60 / 1000; // the cut around an onset (the dump test)
     const int OnsetGap = Rate * 60 / 1000;  // a fast gun fires 10-15 times a second
     const int StaleMs = 250;                // a cut the model reaches later than this is dropped: late is worse than missed
     // Real hits only: "Slam", "Thump, thud" and "Burst, pop" also name doors, footsteps and bubbles
@@ -42,7 +44,7 @@ public sealed class SoundFx : IDisposable
         "Breaking", "Shatter" };
     static readonly string[] GunNames = { "Gunshot, gunfire", "Machine gun", "Fusillade", "Artillery fire", "Cap gun" };
     static readonly string[] FootNames = { "Walk, footsteps", "Run", "Shuffle" };
-    const double GunScore = 0.3, ImpactScore = 0.35, ThunderScore = 0.35, AroundScore = 0.2;
+    const double GunScore = 0.2, ShotLoudness = 0.35, ImpactScore = 0.35, ThunderScore = 0.35, SirenScore = 0.3, SirenKeep = 0.25;
     const int Fade = Rate * 5 / 1000;       // each repeat of a cut fades in and out, or the seams click like shots
     static readonly string[] SirenNames = { "Siren", "Civil defense siren", "Police car (siren)", "Ambulance (siren)", "Fire engine, fire truck (siren)",
         "Alarm", "Car alarm", "Smoke detector, smoke alarm", "Fire alarm" };
@@ -85,7 +87,7 @@ public sealed class SoundFx : IDisposable
     // sudden sounds over a minute, for the log
     int _cutsMade, _judged, _late, _fast, _shots, _impacts; double _clipGun, _clipImpact, _judgeMs;
     readonly Dictionary<string, int> _clipTops = new();
-    long _lastEffectTick, _lastThunderTick;
+    long _lastEffectTick, _lastThunderTick, _sirenOnUntil; bool _sirenLookPrev;
     readonly long[] _lastHeard = new long[Enum.GetValues<SoundKind>().Length];
     // what was heard, for the log: strongest effect scores and the loudest top class over a minute
     double _sumImpact, _sumGun, _sumSiren, _sumHorn, _sumHeart, _sumThunder; string _top = ""; double _topScore; int _hops; long _statTick;
@@ -306,10 +308,8 @@ public sealed class SoundFx : IDisposable
                 _onsets.RemoveAt(0);
                 long from = at - PreSamples;
                 if (Paused || _samples - from > _ring.Length) continue;
-                var clip = new float[PreSamples + PostSamples];
-                int start = (int)(((_write - (_samples - from)) % _ring.Length + _ring.Length) % _ring.Length);
-                for (int k = 0; k < clip.Length; k++) clip[k] = _ring[(start + k) % _ring.Length];
-                var around = new float[Window];                       // the last second, as it sounded
+                var clip = Array.Empty<float>();
+                var around = new float[Window];                       // the second that ends 60 ms after the onset
                 int aStart = (_write - Window + _ring.Length) % _ring.Length;
                 for (int k = 0; k < Window; k++) around[k] = _ring[(aStart + k) % _ring.Length];
                 (ready ??= new()).Add((clip, around, rms));
@@ -356,11 +356,10 @@ public sealed class SoundFx : IDisposable
 
     void JudgeLoop()
     {
-        var wave = new float[Window];
         while (!_stop)
         {
             _cutReady.Wait(1000);
-            (float[] clip, float[] around, double rms, long tick) cut;
+            (float[] clip, float[] around, double rms, long tick) cut;  // clip: unused, kept for the queue's shape
             lock (_cuts)
             {
                 if (_cuts.Count == 0) continue;
@@ -368,34 +367,26 @@ public sealed class SoundFx : IDisposable
             }
             if (_stop) return;
             if (Environment.TickCount64 - cut.tick > StaleMs) { _late++; continue; }
-            try { Judge(cut.clip, cut.around, cut.rms, wave); }
+            try { Judge(cut.around, cut.rms); }
             catch (Exception ex) { Log.Error("soundfx judge", ex); }
         }
     }
 
     /// <summary>
-    /// One sudden sound: what is it, and is there gunfire or a blast around? A shot blinks, an explosion or a crash
-    /// pulses, thunder strikes; a footstep, a click or music does nothing.
+    /// One sudden sound, judged on the second that ends 60 ms after it began: a shot blinks, a blast or a crash pulses,
+    /// thunder strikes; a footstep, a click, speech or music does nothing.
     /// </summary>
-    void Judge(float[] clip, float[] around, double rms, float[] wave)
+    void Judge(float[] around, double rms)
     {
-        // the cut repeated over the window, each repeat faded in and out
-        for (int i = 0; i < Window; i++)
-        {
-            int k = i % clip.Length;
-            double edge = Math.Min(1, Math.Min(k, clip.Length - 1 - k) / (double)Fade);
-            wave[i] = (float)(clip[k] * edge);
-        }
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        var one = Scores(wave);
-        var all = Scores(around);
-        double gun = one.Max(_gun), impact = one.Max(_impact), foot = one.Max(_foot), thunder = one.Max(_thunder);
-        double gunAround = all.Max(_gun), impactAround = all.Max(_impact), thunderAround = all.Max(_thunder);
-        int top = one.Top();
+        var h = Scores(around);
+        double gun = h.Max(_gun), impact = h.Max(_impact), foot = h.Max(_foot), thunder = h.Max(_thunder);
+        int top = h.Top();
         long now = Environment.TickCount64;
-        bool shot = gun >= GunScore && gun >= impact && gun > foot && gunAround >= AroundScore;
-        bool blast = !shot && impact >= ImpactScore && impact > foot && Math.Max(impactAround, gunAround) >= AroundScore;
-        bool clap = !shot && !blast && thunder >= ThunderScore && thunderAround >= AroundScore;
+        double loudest; lock (_shotGate) loudest = _loudestShot;
+        bool shot = gun >= GunScore && gun >= impact && gun > foot && rms >= ShotLoudness * loudest;
+        bool blast = !shot && impact >= ImpactScore && impact > gun && impact > foot;
+        bool clap = !shot && !blast && thunder >= ThunderScore;
         lock (_clipTops)
         {
             _judged++; _judgeMs += System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
@@ -403,7 +394,7 @@ public sealed class SoundFx : IDisposable
             string name = _names[top] ?? top.ToString();
             _clipTops[name] = _clipTops.TryGetValue(name, out int n) ? n + 1 : 1;
         }
-        if (Lab) Log.Write($"soundfx lab: rms {rms:F3} one «{_names[top]}» gun {gun:F2} impact {impact:F2} foot {foot:F2} | around gun {gunAround:F2} impact {impactAround:F2}" +
+        if (Lab) Log.Write($"soundfx lab: rms {rms:F3} «{_names[top]}» gun {gun:F2} impact {impact:F2} foot {foot:F2}" +
             (shot ? " -> SHOT" : blast ? " -> BLAST" : clap ? " -> THUNDER" : ""));
         if (shot) Shoot(rms, now);
         else if (blast) { _impacts++; Fire(SoundKind.Impact, impact, ImpactScore, now); }
@@ -470,7 +461,11 @@ public sealed class SoundFx : IDisposable
             Stats(scores, frames, impact, gun, siren, horn, heart, thunder, now);
             // Sudden sounds are judged one by one as they come (Judge); a look would show them up to a second late.
             // a siren, a horn and a heartbeat fire every look while they last: their lights follow the sound
-            if (siren > 0.4) Fire(SoundKind.Siren, siren, 0.4, now);
+            // a siren: two looks in a row to start, then on while heard within 2.5 s, so it neither flickers nor starts on a blip
+            if (siren >= SirenScore && _sirenLookPrev) _sirenOnUntil = now + 2500;
+            _sirenLookPrev = siren >= SirenScore;
+            if (siren >= SirenKeep && now < _sirenOnUntil) _sirenOnUntil = now + 2500;
+            if (now < _sirenOnUntil) Fire(SoundKind.Siren, Math.Max(siren, SirenScore), SirenScore, now);
             if (horn > 0.4) Fire(SoundKind.Horn, horn, 0.4, now);
             if (heart > 0.3) Fire(SoundKind.Heartbeat, heart, 0.3, now);
             // thunder rolls on after its clap: a look still catches one the clap's cut missed
