@@ -24,12 +24,14 @@ public sealed class LightService : IDisposable
     // Colors as the stick LEDs show them: their green is far brighter than their red, so warm colors carry little
     // green (a light orange #FFB068 showed as green on the ROG Xbox Ally X, 16.11).
     static readonly Rgb Red = Rgb.Hex(0xFF0800), Orange = Rgb.Hex(0xFF2A00), Yellow = Rgb.Hex(0xFF6A00),
-        Green = Rgb.Hex(0x10FF30), Blue = Rgb.Hex(0x0020FF), Lightning = Rgb.Hex(0x9080FF);
+        Green = Rgb.Hex(0x10FF30), Blue = Rgb.Hex(0x0020FF), Lightning = Rgb.Hex(0xCC66FF); // cold white on these LEDs
 
     // Every effect rises softly, holds, then fades on a curve that looks even to the eye, 30 frames a second.
-    const int FrameMs = 33, SirenMs = 2400, SirenPeriod = 1200, HeartPeriod = 1000, HeartDub = 250;
-    static readonly Pulse ImpactPulse = new(120, 600, 900), HornPulse = new(100, 350, 700), ChargePulse = new(150, 600, 900),
-        SirenEnvelope = new(150, SirenMs - 550, 400), ThunderPulse = new(40, 150, 900), HeartBeat = new(60, 60, 220);
+    // Each effect has its own shape, so it reads even where colors look alike: one long pulse (impact), two blinks
+    // (horn), two sharp strokes (thunder), a lub-dub (heartbeat), red and blue in turn (siren), slow breathing (states).
+    const int FrameMs = 33, SirenPeriod = 1200, HeartPeriod = 1000, HeartDub = 250, ThunderMs = 700, HornGap = 260, HornMs = HornGap + 350;
+    static readonly Pulse ImpactPulse = new(120, 600, 900), HornBlink = new(40, 110, 200), ChargePulse = new(150, 600, 900),
+        HeartBeat = new(60, 60, 220);
 
     /// <summary>Brightness 0..1 of a one-shot effect over time: smooth rise, hold, then a squared fall
     /// (LED light looks linear to the eye only on a curve; a straight fall seems to hang, then drop).</summary>
@@ -55,8 +57,8 @@ public sealed class LightService : IDisposable
 
     // one-shot effect
     long _fxStart; int _fxMs; SoundKind? _fx; double _fxStrength;
-    // a heartbeat heard in the game: beats from _heartStart until _heartUntil (the end of a beat)
-    long _heartStart, _heartUntil;
+    // a heartbeat or a siren heard in the game: runs from its start until its until (the end of a beat or a turn)
+    long _heartStart, _heartUntil, _sirenStart, _sirenUntil;
     // states
     volatile bool _downloading, _downloaded, _batteryLow, _hot, _skip, _charging, _docked;
     int _dockLogged = -1;
@@ -64,7 +66,7 @@ public sealed class LightService : IDisposable
     long _chargeFlashStart = -1;
     Rgb _accent = Rgb.Hex(0x0078D4);
     // download detection, like the console's own keep-awake: > 500 KB/s for 20 s
-    long _rxPrev = -1; int _rxHits; long _busyTick;
+    long _rxPrev = -1; int _rxHits; long _busyTick, _launcherTick, _launcherWritten = -1;
     long _lastInputTick; uint _lastPadPacket;
     long _heatTick;
     string _demo = ""; long _demoUntil;
@@ -111,8 +113,15 @@ public sealed class LightService : IDisposable
                 _heartUntil = _heartStart + ((now + 1500 - _heartStart) / HeartPeriod + 1) * HeartPeriod;
                 return;
             }
+            if (kind == SoundKind.Siren)
+            {
+                // police lights on while the siren wails (at least two turns), then off at the end of a turn
+                if (now >= _sirenUntil) _sirenStart = now;
+                _sirenUntil = _sirenStart + ((now + SirenPeriod - _sirenStart) / SirenPeriod + 1) * SirenPeriod;
+                return;
+            }
             _fx = kind; _fxStrength = strength; _fxStart = now;
-            _fxMs = kind switch { SoundKind.Impact => ImpactPulse.Total, SoundKind.Siren => SirenMs, SoundKind.Thunder => ThunderPulse.Total, _ => HornPulse.Total };
+            _fxMs = kind switch { SoundKind.Impact => ImpactPulse.Total, SoundKind.Thunder => ThunderMs, _ => HornMs };
         }
     }
 
@@ -136,8 +145,20 @@ public sealed class LightService : IDisposable
             foreach (var n in NetworkInterface.GetAllNetworkInterfaces())
                 if (n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
                     try { rx += n.GetIPStatistics().BytesReceived; } catch { }
-            if (_rxPrev >= 0) { _rxHits = rx - _rxPrev > 500 * 1024 ? _rxHits + 1 : 0; if (_rxHits >= 20) _busyTick = now; }
+            bool busy = _rxPrev >= 0 && rx - _rxPrev > 500 * 1024;
             _rxPrev = rx;
+            // A game, not a video or a stream: a game launcher writes to disk too (in bursts, so within the last 10 s).
+            // Looked at only while the network is busy: the process list costs a little.
+            if (busy)
+            {
+                long written = Launchers.Written();
+                if (_launcherWritten >= 0 && written - _launcherWritten > 200 * 1024) _launcherTick = now;
+                _launcherWritten = written;
+            }
+            else _launcherWritten = -1;
+            bool game = _launcherTick > 0 && now - _launcherTick < 10_000;
+            _rxHits = busy && game ? _rxHits + 1 : 0;
+            if (_rxHits >= 20) _busyTick = now;
             bool was = _downloading;
             _downloading = s.LightsDownload && _busyTick > 0 && now - _busyTick < 120_000;
             if (was && !_downloading && s.LightsDownload) _downloaded = true;  // green until he touches the console
@@ -225,19 +246,23 @@ public sealed class LightService : IDisposable
                 case SoundKind.Impact:
                     var c = Rgb.Mix(idle, Orange.Scale(k), ImpactPulse.At(age));
                     return (c, c);
-                case SoundKind.Siren:
-                    // police lights: red on the left and blue on the right swell and ebb in turn
-                    double w = 0.5 - 0.5 * Math.Cos(2 * Math.PI * age / SirenPeriod), env = k * SirenEnvelope.At(age);
-                    return (Rgb.Mix(idle, Red, env * w * w), Rgb.Mix(idle, Blue, env * (1 - w) * (1 - w)));
                 case SoundKind.Thunder:
-                    var z = Rgb.Mix(idle, Lightning.Scale(k), ThunderPulse.At(age));
+                    var z = Rgb.Mix(idle, Lightning.Scale(Math.Max(k, 0.8)), Strike(age));
                     return (z, z);
-                default:
-                    var h = Rgb.Mix(idle, Yellow.Scale(k), HornPulse.At(age));
+                default: // a horn: two short yellow blinks, beep-beep
+                    var h = Rgb.Mix(idle, Yellow.Scale(k), Math.Max(HornBlink.At(age), HornBlink.At(age - HornGap)));
                     return (h, h);
             }
         }
-        // 2. a heartbeat in the game (low health in many games): a dim red lub-dub once a second while it is heard
+        // 2. a siren or an alarm in the game: police lights, red on the left and blue on the right swell in turn
+        long ss, su; lock (_gate) { ss = _sirenStart; su = _sirenUntil; }
+        if (!dark && now < su)
+        {
+            long a = now - ss;
+            double w = 0.5 - 0.5 * Math.Cos(2 * Math.PI * a / SirenPeriod), env = Math.Clamp(Math.Min(a / 150.0, (su - now) / 400.0), 0, 1);
+            return (Rgb.Mix(idle, Red, env * w * w), Rgb.Mix(idle, Blue, env * (1 - w) * (1 - w)));
+        }
+        // 2b. a heartbeat in the game (low health in many games): a dim red lub-dub once a second while it is heard
         long hs, hu; lock (_gate) { hs = _heartStart; hu = _heartUntil; }
         if (!dark && now < hu)
         {
@@ -257,6 +282,17 @@ public sealed class LightService : IDisposable
         // 6. idle glow; nothing on a dark screen
         return dark ? (Rgb.Off, Rgb.Off) : (idle, idle);
     }
+
+    /// <summary>Lightning: two sharp strokes, then a quick fade (a soft rise and a long fall looked like a glow, not
+    /// lightning, 16.11).</summary>
+    static double Strike(long age) => age switch
+    {
+        < 70 => 1,
+        < 160 => 0.05,
+        < 280 => 1,
+        < ThunderMs => Math.Pow(1 - (age - 280) / (double)(ThunderMs - 280), 2),
+        _ => 0
+    };
 
     /// <summary>Slow breathing 0..1, squared so it swells and ebbs evenly to the eye.</summary>
     static double Breath(double t, double period) { double b = 0.5 - 0.5 * Math.Cos(2 * Math.PI * t / period); return b * b; }
@@ -340,6 +376,36 @@ static class Input
                 touched = true;
         }
         return touched;
+    }
+}
+
+/// <summary>
+/// Bytes written to disk so far by the game launchers that are running (Steam, Epic, EA, Ubisoft, Battle.net, GOG,
+/// Xbox). A download writes what it receives; a video or a stream in a browser does not. A process Windows does not
+/// let a normal user read (a system service) counts as nothing.
+/// </summary>
+static class Launchers
+{
+    static readonly HashSet<string> Names = new(StringComparer.OrdinalIgnoreCase) { "steam", "EpicGamesLauncher", "EADesktop",
+        "EABackgroundService", "upc", "Agent", "Battle.net", "GalaxyClient", "GalaxyClientService", "gamingservices", "XboxPcApp" };
+    [StructLayout(LayoutKind.Sequential)]
+    struct IoCounters { public ulong ReadOps, WriteOps, OtherOps, ReadBytes, WriteBytes, OtherBytes; }
+    [DllImport("kernel32.dll")] static extern bool GetProcessIoCounters(IntPtr process, out IoCounters counters);
+    const uint QueryLimited = 0x1000;
+
+    public static long Written()
+    {
+        long sum = 0;
+        foreach (var p in Process.GetProcesses())   // one snapshot of the process list
+            using (p)
+            {
+                if (!Names.Contains(p.ProcessName)) continue;
+                IntPtr h = Native.OpenProcess(QueryLimited, false, (uint)p.Id);
+                if (h == IntPtr.Zero) continue;
+                try { if (GetProcessIoCounters(h, out var c)) sum += (long)c.WriteBytes; }
+                finally { Native.CloseHandle(h); }
+            }
+        return sum;
     }
 }
 

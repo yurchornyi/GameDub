@@ -299,13 +299,19 @@ public sealed class MainWindow : Window
         list.Children.Add(Info("Перевибір області (кнопка M2)", KeyNames(_s.HotkeyRegion)));
 
         list.Children.Add(Section("Підсвітка стіків"));
-        Button LightToggle(string label, Func<bool> get, Action<bool> set) => Toggle(label, get, v => { set(v); SaveSettings(); });
-        list.Children.Add(LightToggle("Підсвітка стіків", () => _s.LightsOn, v => _s.LightsOn = v));
-        list.Children.Add(LightToggle("Спалахи на звукові ефекти", () => _s.LightsSound, v => _s.LightsSound = v));
-        list.Children.Add(LightToggle("Вібрація на вибухи й удари", () => _s.LightsRumble, v => _s.LightsRumble = v));
-        list.Children.Add(LightToggle("Завантаження ігор", () => _s.LightsDownload, v => _s.LightsDownload = v));
-        list.Children.Add(LightToggle("Мало заряду і зарядка", () => _s.LightsBattery, v => _s.LightsBattery = v));
-        list.Children.Add(LightToggle("Перегрів", () => _s.LightsHeat, v => _s.LightsHeat = v));
+        Button LightToggle(string label, Func<bool> get, Action<bool> set, string note) => Toggle(label, get, v => { set(v); SaveSettings(); }, note);
+        list.Children.Add(LightToggle("Підсвітка стіків", () => _s.LightsOn, v => _s.LightsOn = v,
+            "Темні, поки нічого не відбувається; на телевізорі вимкнені"));
+        list.Children.Add(LightToggle("Спалахи на звукові ефекти", () => _s.LightsSound, v => _s.LightsSound = v,
+            "Удар — помаранчевий · сирена — червоний і синій · гудок — жовтий двічі · грім — білий · серце — червоний «тук-тук»"));
+        list.Children.Add(LightToggle("Вібрація на вибухи й удари", () => _s.LightsRumble, v => _s.LightsRumble = v,
+            "Коротка вібрація на удар і гудок, для ігор, які самі не вібрують"));
+        list.Children.Add(LightToggle("Завантаження ігор", () => _s.LightsDownload, v => _s.LightsDownload = v,
+            "Синє «дихання», поки лаунчер качає гру · зелене — скачалось, до дотику"));
+        list.Children.Add(LightToggle("Мало заряду і зарядка", () => _s.LightsBattery, v => _s.LightsBattery = v,
+            "Нижче 10 % — червоне «дихання» раз на 20 с · зарядка — зелений спалах"));
+        list.Children.Add(LightToggle("Перегрів", () => _s.LightsHeat, v => _s.LightsHeat = v,
+            "Від 85 °C — помаранчеве «дихання» раз на 20 с"));
         list.Children.Add(Number("Яскравість у спокої", () => _s.LightsBase, v => _s.LightsBase = v, 0, 50, 5, v => v + " %"));
         list.Children.Add(TextRow("Ігри зі своїм світлом", () => string.Join(", ", _s.LightsSkipGames),
             v => _s.LightsSkipGames = v.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -406,12 +412,21 @@ public sealed class MainWindow : Window
 
     // ---------- settings rows ----------
 
-    Button RowButton(string label, Row row, UIElement? valueElement = null)
+    Button RowButton(string label, Row row, UIElement? valueElement = null, string? note = null)
     {
-        var g = new Grid { Height = 64 };
+        var g = new Grid { Height = note == null ? 64 : 88 };
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        g.Children.Add(new TextBlock { Text = label, FontSize = 24, VerticalAlignment = VerticalAlignment.Center, Foreground = White, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 0, 20, 0) });
+        var title = new TextBlock { Text = label, FontSize = 24, Foreground = White, TextTrimming = TextTrimming.CharacterEllipsis };
+        if (note == null) { title.VerticalAlignment = VerticalAlignment.Center; title.Margin = new Thickness(0, 0, 20, 0); g.Children.Add(title); }
+        else
+        {
+            // a second, dim line under the label: what this setting shows
+            var two = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 20, 0) };
+            two.Children.Add(title);
+            two.Children.Add(new TextBlock { Text = note, FontSize = 17, Foreground = Dim, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 2, 0, 0) });
+            g.Children.Add(two);
+        }
         if (valueElement == null)
         {
             row.ValueText = new TextBlock { FontSize = 24, Foreground = Accent, VerticalAlignment = VerticalAlignment.Center, Text = row.Value() };
@@ -445,7 +460,7 @@ public sealed class MainWindow : Window
         return RowButton(label, row);
     }
 
-    Button Toggle(string label, Func<bool> get, Action<bool> set)
+    Button Toggle(string label, Func<bool> get, Action<bool> set, string? note = null)
     {
         var row = new Row { Value = () => get() ? "Увімкнено" : "Вимкнено" };
         row.Change = _ =>
@@ -453,7 +468,7 @@ public sealed class MainWindow : Window
             try { set(!get()); } catch (Exception ex) { Toast("Помилка: " + ex.Message); }
             RefreshRows();
         };
-        return RowButton(label, row);
+        return RowButton(label, row, note: note);
     }
 
     Button ActionRow(string label, string value, Action act) => RowButton(label, new Row { Value = () => value, Activate = act });
