@@ -17,21 +17,25 @@ namespace GameDub.Tray;
 /// - no start with Windows (Windows' own startup switch, so Settings -> Apps -> Startup can turn it back on);
 /// - while a game is in front, a launcher that takes the screen from it is minimized, and the launcher's other windows
 ///   that pop up (news, friends, offers) are minimized or, if small, hidden;
-/// - a minute after the game ends, a launcher that started for it is closed the way Windows closes apps at shutdown,
-///   so it saves its sign-in. Never killed: one that does not close stays.
+/// - a minute after the game ends, a launcher that started for it is closed, as on the Steam Deck (see
+///   <see cref="CloseLaunchers"/>): asked first, ended if it does not go.
 /// Steam is left alone: it already starts in the background for its games, and its keyboard is a window of its own.
-/// A game is any full-screen window of an app that is not Windows, a launcher or a tool. A launcher the player opens
+/// A game is any full-screen window without a title bar of an app that is not Windows, a launcher or a tool. A launcher the player opens
 /// on purpose (through the Xbox button, the task switcher) is not pushed back: only one that takes the screen straight
 /// from the game is.
 /// </summary>
 sealed class QuietLaunchers : IDisposable
 {
-    // Install folders of the launchers (with their helpers and web views). Games live elsewhere, except Ubisoft's.
-    static readonly string[] LauncherDirs =
+    // Install folders of the launchers (with their helpers and web views), and which launcher each is. Games live
+    // elsewhere, except Ubisoft's.
+    static readonly (string dir, string name)[] Groups =
     {
-        @"\Epic Games\Launcher\", @"\Ubisoft Game Launcher\", @"\Rockstar Games\Launcher\", @"\Rockstar Games\Social Club\",
-        @"\Electronic Arts\EA Desktop\", @"\Origin\", @"\Battle.net\", @"\GOG Galaxy\", @"\Amazon Games\App\",
+        (@"\Epic Games\Launcher\", "Epic"), (@"\Ubisoft Game Launcher\", "Ubisoft Connect"),
+        (@"\Rockstar Games\Launcher\", "Rockstar"), (@"\Rockstar Games\Social Club\", "Rockstar"),
+        (@"\Electronic Arts\EA Desktop\", "EA app"), (@"\Origin\", "EA app"), (@"\Battle.net\", "Battle.net"),
+        (@"\GOG Galaxy\", "GOG Galaxy"), (@"\Amazon Games\App\", "Amazon Games"),
     };
+    static readonly string[] LauncherDirs = Groups.Select(g => g.dir).ToArray();
     // Not games, even full screen: the Xbox full screen home, Game Bar, Windows itself, Armoury Crate. Microsoft's games
     // (Forza) are WindowsApps\Microsoft.<number> packages or live in XboxGames, so they still count.
     static readonly string[] NotGameDirs =
@@ -154,35 +158,66 @@ sealed class QuietLaunchers : IDisposable
     }
 
     /// <summary>
-    /// Launchers that started for this game (not before it, give or take two minutes), are not in front and are not
-    /// downloading: asked to close through the Restart Manager, as at Windows shutdown. They save and exit.
+    /// After the game, as on the Steam Deck: there a launcher lives in the game's Proton prefix and ends with the game,
+    /// and the sign-ins were kept (owner, 16.11). A launcher that started for this game (within ten minutes before it:
+    /// Rockstar signs in and patches first), is not in front and is not downloading is first asked to close as at
+    /// Windows shutdown (Restart Manager). 16.11 Ubisoft Connect and the Rockstar launcher refused that (code 351), so
+    /// whatever of it still runs 15 s later is ended. Only this user's processes: the launchers' services stay.
     /// </summary>
     void CloseLaunchers(DateTime sinceUtc)
     {
+        int session = Process.GetCurrentProcess().SessionId;
         var fg = PidOf(GetForegroundWindow());
         var withWindows = new HashSet<int>();
         EnumWindows((h, _) => { GetWindowThreadProcessId(h, out uint p); withWindows.Add((int)p); return true; }, IntPtr.Zero);
-        var close = new List<(int pid, DateTime start, string path)>();
+        var groups = new Dictionary<string, List<(int pid, DateTime start)>>();
         foreach (var (pid, path) in LauncherProcesses())
         {
-            if (pid == fg || !withWindows.Contains(pid)) continue;
-            DateTime start;
-            try { using var p = Process.GetProcessById(pid); start = p.StartTime.ToUniversalTime(); } catch { continue; }
-            if (start < sinceUtc - TimeSpan.FromMinutes(2)) { Tell(path, "opened before the game: left"); continue; }
-            if (_written.TryGetValue(pid, out long w0) && Written(pid) - w0 > 5 * 1024 * 1024) { Tell(path, "downloading: left"); continue; }
-            close.Add((pid, start, path));
+            try
+            {
+                using var p = Process.GetProcessById(pid);
+                if (p.SessionId != session) continue;
+                var name = GroupOf(path)!;
+                if (!groups.TryGetValue(name, out var list)) groups[name] = list = new();
+                list.Add((pid, p.StartTime.ToUniversalTime()));
+            }
+            catch { }   // gone, or not ours to ask
+        }
+        var close = new List<(string name, List<(int pid, DateTime start)> procs)>();
+        foreach (var (name, procs) in groups)
+        {
+            if (procs.Any(p => p.pid == fg)) { Tell(name, "in front: left"); continue; }
+            var windowed = procs.Where(p => withWindows.Contains(p.pid)).ToList();
+            var first = (windowed.Count > 0 ? windowed : procs).Min(p => p.start);
+            if (first < sinceUtc - TimeSpan.FromMinutes(10)) { Tell(name, "opened before the game: left"); continue; }
+            long wrote = procs.Sum(p => _written.TryGetValue(p.pid, out long w0) ? Math.Max(0, Written(p.pid) - w0) : 0);
+            if (wrote > 5 * 1024 * 1024) { Tell(name, "downloading: left"); continue; }
+            close.Add((name, procs));
         }
         if (close.Count == 0) return;
         Task.Run(() =>
         {
             try
             {
-                int err = Shutdown(close.Select(c => (c.pid, c.start)).ToArray());
-                System.Threading.Thread.Sleep(20_000);
-                var left = close.Where(c => Alive(c.pid)).Select(c => Path.GetFileName(c.path)).Distinct().ToList();
-                var gone = close.Where(c => !Alive(c.pid)).Select(c => Path.GetFileName(c.path)).Distinct().ToList();
-                Log.Write($"quiet launchers: closed after the game: {(gone.Count > 0 ? string.Join(", ", gone) : "none")}" +
-                          (left.Count > 0 ? $"; still open (left as is): {string.Join(", ", left)}, code {err}" : ""));
+                var ask = close.SelectMany(c => c.procs).Where(p => withWindows.Contains(p.pid)).ToArray();
+                int err = ask.Length > 0 ? Shutdown(ask) : 0;
+                System.Threading.Thread.Sleep(15_000);
+                foreach (var (name, procs) in close)
+                {
+                    var alive = procs.Where(p => Alive(p.pid)).ToList();
+                    if (alive.Count == 0) { Log.Write($"quiet launchers: {name} closed after the game"); continue; }
+                    int ended = 0;
+                    foreach (var (pid, start) in alive)
+                        try
+                        {
+                            using var pr = Process.GetProcessById(pid);
+                            if (pr.StartTime.ToUniversalTime() != start) continue;   // the pid went to another process
+                            pr.Kill();
+                            ended++;
+                        }
+                        catch { }
+                    Log.Write($"quiet launchers: {name} did not close by itself (code {err}): ended {ended} of {alive.Count} processes");
+                }
             }
             catch (Exception ex) { Log.Error("quiet launchers close", ex); }
         });
@@ -266,9 +301,14 @@ sealed class QuietLaunchers : IDisposable
         return LauncherDirs.Any(d => path.Contains(d, StringComparison.OrdinalIgnoreCase));
     }
 
+    static string? GroupOf(string? path) =>
+        IsLauncher(path) ? Groups.First(g => path!.Contains(g.dir, StringComparison.OrdinalIgnoreCase)).name : null;
+
     static bool IsGameWindow(IntPtr hwnd, string? path)
     {
         if (path == null || IsLauncher(path)) return false;
+        // A window with a title bar is not a game, even maximized over the whole screen (Bitwarden, 16.11).
+        if ((GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64() & WS_CAPTION) == WS_CAPTION) return false;
         if (path.StartsWith(Path.GetDirectoryName(Paths.Exe) + "\\", StringComparison.OrdinalIgnoreCase)) return false;
         if (path.StartsWith(Environment.GetFolderPath(Environment.SpecialFolder.Windows) + "\\", StringComparison.OrdinalIgnoreCase)) return false;
         if (NotGameDirs.Any(d => path.Contains(d, StringComparison.OrdinalIgnoreCase))) return false;
