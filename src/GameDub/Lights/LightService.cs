@@ -13,7 +13,7 @@ namespace GameDub.Lights;
 
 /// <summary>
 /// Joystick lighting, owned by the tray service. A dim idle glow in the Windows accent color, and on top of it
-/// at most one event at a time, by priority: a sound effect flash, a game download, low battery, overheating.
+/// at most one event at a time, by priority: a sound effect flash, overheating, the charger, a game download.
 /// Games listed in <see cref="AppSettings.LightsSkipGames"/>, and any game that takes the lamps itself through
 /// Windows Dynamic Lighting, are left alone. Dark screen: lights off, except a running download.
 /// Switched off in the settings, the tray disposes this, and Windows' own lighting effect comes back.
@@ -33,7 +33,7 @@ public sealed class LightService : IDisposable
     // one-shot effect
     long _fxStart; int _fxMs; SoundKind? _fx; double _fxStrength;
     // states
-    volatile bool _downloading, _downloaded, _batteryLow, _hot, _skip, _charging;
+    volatile bool _downloading, _downloaded, _hot, _skip, _charging;
     bool _skipShown;
     long _chargeFlashStart = -1;
     Rgb _accent = Rgb.Hex(0x0078D4);
@@ -108,7 +108,6 @@ public sealed class LightService : IDisposable
             bool charging = p.PowerLineStatus == PowerLineStatus.Online;
             if (charging && !_charging && s.LightsCharging) _chargeFlashStart = now;
             _charging = charging;
-            _batteryLow = s.LightsBatteryLow && !charging && p.BatteryLifePercent is > 0 and < 0.2f;
 
             if (s.LightsHeat && now - _heatTick > 10_000) { _heatTick = now; _hot = Thermal.MaxCelsius() >= 85; }
             if (!s.LightsHeat) _hot = false;
@@ -163,8 +162,7 @@ public sealed class LightService : IDisposable
                     return (h, h);
             }
         }
-        // 2. battery low and overheating: slow breathing for 3 s of every 20
-        if (_batteryLow && (now / 1000) % 20 < 3) { var c = Red.Scale(Breath(t, 3) * 0.8); return (c, c); }
+        // 2. overheating: slow breathing for 3 s of every 20
         if (_hot && (now / 1000) % 20 < 3) { var c = Orange.Scale(Breath(t, 3) * 0.7); return (c, c); }
         // 3. charger plugged in: one green flash
         if (_chargeFlashStart > 0 && now - _chargeFlashStart < 700) { var c = Green.Scale(1 - (now - _chargeFlashStart) / 700.0); return (c, c); }

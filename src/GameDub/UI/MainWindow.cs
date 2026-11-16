@@ -304,7 +304,6 @@ public sealed class MainWindow : Window
         list.Children.Add(LightToggle("Спалахи на звукові ефекти", () => _s.LightsSound, v => _s.LightsSound = v));
         list.Children.Add(LightToggle("Вібрація на вибухи й удари", () => _s.LightsRumble, v => _s.LightsRumble = v));
         list.Children.Add(LightToggle("Завантаження ігор", () => _s.LightsDownload, v => _s.LightsDownload = v));
-        list.Children.Add(LightToggle("Мало заряду", () => _s.LightsBatteryLow, v => _s.LightsBatteryLow = v));
         list.Children.Add(LightToggle("Зарядка", () => _s.LightsCharging, v => _s.LightsCharging = v));
         list.Children.Add(LightToggle("Перегрів", () => _s.LightsHeat, v => _s.LightsHeat = v));
         list.Children.Add(Number("Яскравість у спокої", () => _s.LightsBase, v => _s.LightsBase = v, 0, 50, 5, v => v + " %"));
