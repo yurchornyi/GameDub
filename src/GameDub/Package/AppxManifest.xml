@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Sparse package: gives GameDub.exe (left where it is, C:\GameDub\app) a package identity, because Windows lets only
+  packaged apps drive Dynamic Lighting in the background ("ambient lighting", the com.microsoft.windows.lighting
+  app extension). Built and signed by .github/workflows/build.yml; installed by src/tools/install-package.ps1.
+  The version is set by the build. app.manifest carries the matching <msix> element.
+-->
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+         xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap uap3 uap10 rescap">
+  <Identity Name="GameDub" Publisher="CN=GameDub" Version="0.2.0.0" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>GameDub</DisplayName>
+    <PublisherDisplayName>GameDub</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+  <Resources>
+    <Resource Language="uk-UA" />
+  </Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+  <Applications>
+    <Application Id="GameDub" Executable="GameDub.exe" uap10:TrustLevel="mediumIL" uap10:RuntimeBehavior="win32App">
+      <uap:VisualElements DisplayName="GameDub" Description="GameDub" BackgroundColor="transparent" AppListEntry="none"
+                          Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <uap3:Extension Category="windows.appExtension">
+          <uap3:AppExtension Name="com.microsoft.windows.lighting" Id="GameDub" DisplayName="GameDub" PublicFolder="Public" />
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>

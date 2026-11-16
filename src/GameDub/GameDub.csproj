@@ -2,7 +2,8 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <!-- 26100: LampArray.IsAvailable / AvailabilityChanged (Dynamic Lighting hand-over to games). Runs on 19041+ all the same. -->
+    <TargetFramework>net8.0-windows10.0.26100.0</TargetFramework>
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>false</SelfContained>
@@ -25,6 +26,9 @@
   <ItemGroup>
     <!-- Offline TTS (Supertonic 3). CPU build only: ~15 MB of native DLLs. -->
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.20.1" />
+    <!-- Joystick lighting: loopback of what Windows plays (sound effects), thermal zones. -->
+    <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+    <PackageReference Include="System.Management" Version="8.0.0" />
   </ItemGroup>
 
 </Project>

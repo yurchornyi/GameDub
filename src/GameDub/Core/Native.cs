@@ -38,6 +38,8 @@ internal static class Native
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool QueryFullProcessImageName(IntPtr h, int flags, StringBuilder sb, ref int size);
     [DllImport("kernel32.dll")] public static extern bool AttachConsole(int pid);
     [DllImport("xinput1_4.dll")] public static extern int XInputGetState(int idx, out XINPUT_STATE s);
+    [StructLayout(LayoutKind.Sequential)] public struct XINPUT_VIBRATION { public ushort wLeftMotorSpeed, wRightMotorSpeed; }
+    [DllImport("xinput1_4.dll")] public static extern int XInputSetState(int idx, ref XINPUT_VIBRATION v);
 
     const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     const uint GW_OWNER = 4;

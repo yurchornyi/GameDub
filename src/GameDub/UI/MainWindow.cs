@@ -298,6 +298,21 @@ public sealed class MainWindow : Window
         list.Children.Add(Info("Пауза перекладу (кнопка M1)", KeyNames(_s.HotkeyPause)));
         list.Children.Add(Info("Перевибір області (кнопка M2)", KeyNames(_s.HotkeyRegion)));
 
+        list.Children.Add(Section("Підсвітка стіків"));
+        Button LightToggle(string label, Func<bool> get, Action<bool> set) => Toggle(label, get, v => { set(v); SaveSettings(); });
+        list.Children.Add(LightToggle("Підсвітка стіків", () => _s.LightsOn, v => _s.LightsOn = v));
+        list.Children.Add(LightToggle("Спалахи на звукові ефекти", () => _s.LightsSound, v => _s.LightsSound = v));
+        list.Children.Add(LightToggle("Вібрація на вибухи й удари", () => _s.LightsRumble, v => _s.LightsRumble = v));
+        list.Children.Add(LightToggle("Завантаження ігор", () => _s.LightsDownload, v => _s.LightsDownload = v));
+        list.Children.Add(LightToggle("Мало заряду і зарядка", () => _s.LightsBattery, v => _s.LightsBattery = v));
+        list.Children.Add(LightToggle("Перегрів", () => _s.LightsHeat, v => _s.LightsHeat = v));
+        list.Children.Add(Number("Яскравість у спокої", () => _s.LightsBase, v => _s.LightsBase = v, 0, 50, 5, v => v + " %"));
+        list.Children.Add(TextRow("Ігри зі своїм світлом", () => string.Join(", ", _s.LightsSkipGames),
+            v => _s.LightsSkipGames = v.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(x => x.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? x[..^4] : x).Distinct(StringComparer.OrdinalIgnoreCase).ToList()));
+        if (!Lights.SoundFx.ModelPresent)
+            list.Children.Add(Info("Модель звуків (yamnet)", "немає: src\\tools\\get-models.ps1"));
+
         list.Children.Add(Section("Платні сервіси (необов'язково)"));
         list.Children.Add(Choice("Голоси", () => _s.TtsEngine, v => _s.TtsEngine = v,
             ("auto", "Авто (найкращий з доступних)"), ("edge", "Edge (безкоштовні)"), ("supertonic", "Supertonic (офлайн, безкоштовні)"), ("eleven", "ElevenLabs (живі, ~1 год/міс. безкоштовно)"),
