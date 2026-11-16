@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
   <assemblyIdentity version="1.0.0.0" name="GameDub.app"/>
+  <!-- Package identity from the sparse package (Package\AppxManifest.xml), when it is installed: background lighting. -->
+  <msix xmlns="urn:schemas-microsoft-com:msix.v1" publisher="CN=GameDub" packageName="GameDub" applicationId="GameDub" />
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">

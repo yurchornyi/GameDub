@@ -1,0 +1,52 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Public repository: GitHub-hosted runner only.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Publish
+        run: dotnet publish src/GameDub/GameDub.csproj -c Release -o out/app --nologo -p:UseAppHost=true
+      - name: Sparse package (background lighting identity)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.*\x64' -Directory | Sort-Object Name | Select-Object -Last 1).FullName
+          $pkg = 'out/pkg'
+          New-Item -ItemType Directory -Force "$pkg/Assets", "$pkg/Public" | Out-Null
+          foreach ($n in 'StoreLogo', 'Square150x150Logo', 'Square44x44Logo') { Copy-Item icon.png "$pkg/Assets/$n.png" }
+          Set-Content "$pkg/Public/readme.txt" 'GameDub joystick lighting'
+          # A new version every build, so an update installs over the old one.
+          (Get-Content src/GameDub/Package/AppxManifest.xml -Raw) -replace 'Version="0\.2\.0\.0"', "Version=""0.2.${{ github.run_number }}.0""" |
+            Set-Content "$pkg/AppxManifest.xml" -Encoding utf8
+          & "$bin\makeappx.exe" pack /d $pkg /p out/GameDub.msix /nv /o
+          if ($LASTEXITCODE) { throw 'makeappx failed' }
+          # Self-signed, publisher CN=GameDub as in the manifest; install-package.ps1 trusts the .cer next to it.
+          $cert = New-SelfSignedCertificate -Type Custom -Subject 'CN=GameDub' -KeyUsage DigitalSignature -FriendlyName 'GameDub package' `
+            -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears(5) `
+            -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}')
+          $pw = ConvertTo-SecureString -String ([guid]::NewGuid().ToString()) -Force -AsPlainText
+          Export-PfxCertificate -Cert $cert -FilePath out/sign.pfx -Password $pw | Out-Null
+          Export-Certificate -Cert $cert -FilePath out/GameDub.cer | Out-Null
+          & "$bin\signtool.exe" sign /fd SHA256 /f out/sign.pfx /p ([System.Net.NetworkCredential]::new('', $pw).Password) out/GameDub.msix
+          if ($LASTEXITCODE) { throw 'signtool failed' }
+          Remove-Item out/sign.pfx
+          Copy-Item out/GameDub.msix, out/GameDub.cer out/app/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GameDub-app
+          path: out/app/
+          retention-days: 14

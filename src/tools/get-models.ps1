@@ -32,4 +32,7 @@ Get-Files 'Xenova/opus-mt-ru-uk' "$root\opus-mt-ru-uk" @(
     'config.json', 'generation_config.json', 'tokenizer.json', 'tokenizer_config.json', 'vocab.json',
     'onnx/encoder_model_quantized.onnx', 'onnx/decoder_model_quantized.onnx') 'onnx/'
 
+Write-Host 'YAMNet - sound effects for the joystick lighting (Google, Apache-2.0), ~16 MB'
+Get-Files 'zeropointnine/yamnet-onnx' "$root\yamnet" @('yamnet.onnx', 'yamnet_class_map.csv')
+
 Write-Host 'Done.'

@@ -76,6 +76,16 @@ public sealed class AppSettings
     public string HotkeyPause { get; set; } = "Pause, Ctrl+Alt+P";
     public string HotkeyRegion { get; set; } = "Scroll, Ctrl+Alt+R";
 
+    // Joystick lighting (Lights\LightService): a dim glow plus events. Battery and heat are off unless he turns them on.
+    public bool LightsOn { get; set; } = true;
+    public bool LightsSound { get; set; } = true;      // flashes on sound effects only (explosions, shots, sirens, horns)
+    public bool LightsDownload { get; set; } = true;   // blue while a game downloads, green when done
+    public bool LightsBattery { get; set; } = false;   // red breathing under 20 %, green flash on the charger
+    public bool LightsHeat { get; set; } = false;      // orange breathing at 85 °C and above
+    public int LightsBase { get; set; } = 15;          // idle glow brightness, %
+    // Games that drive the lights themselves: GameDub stays off while one is in front (exe names without .exe).
+    public List<string> LightsSkipGames { get; set; } = new() { "eurotrucks2", "amtrucks" };
+
     public void NormalizeApiKeys()
     {
         GoogleApiKeys = CleanApiKeys(GoogleApiKeys, GoogleApiKey);

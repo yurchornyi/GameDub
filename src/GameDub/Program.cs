@@ -59,6 +59,32 @@ public static class Program
                 foreach (var g in GameScanner.ScanAndMerge())
                     o.AppendLine($"{g.Id} | {g.Name} | {g.InstallDir} | cover={(g.Cover != null)}");
                 break;
+            case "lights":
+            {
+                // --test lights: find the joystick lamps, then red, green, blue, the left stick, the right stick, off
+                using var lights = new Lights.StickLights();
+                Thread.Sleep(2500);
+                o.AppendLine(lights.Describe());
+                foreach (var (l, r, name) in new[] { (0xFF0000u, 0xFF0000u, "red"), (0x00FF00u, 0x00FF00u, "green"), (0x0000FFu, 0x0000FFu, "blue"),
+                    (0xFFFFFFu, 0u, "left"), (0u, 0xFFFFFFu, "right"), (0u, 0u, "off") })
+                {
+                    lights.Show(Lights.Rgb.Hex(l), Lights.Rgb.Hex(r));
+                    o.AppendLine($"{name}: available={lights.Available}");
+                    Thread.Sleep(1500);
+                }
+                break;
+            }
+            case "soundfx":
+            {
+                // --test soundfx [seconds]: log the sound effects heard on the default output
+                int secs = a.Length > 1 ? int.Parse(a[1]) : 60;
+                using var fx = new Lights.SoundFx();
+                var t0 = DateTime.Now;
+                fx.Effect += (k, st) => { lock (o) o.AppendLine($"{(DateTime.Now - t0).TotalSeconds,6:F1} s  {k}  {st:F2}"); };
+                fx.FollowDefaultDevice();
+                Thread.Sleep(secs * 1000);
+                break;
+            }
             case "running":
                 foreach (var g in GameScanner.RunningApps()) o.AppendLine($"{g.Name} | {g.InstallDir}");
                 break;

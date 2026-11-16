@@ -31,6 +31,7 @@ public sealed class TrayApp : ApplicationContext
     HashSet<int> _pids = new();
     volatile IntPtr _hwnd;
     RegionEditor? _editor;
+    Lights.LightService? _lights;
     string _lastStatus = "";
 
     public static int Run()
@@ -93,6 +94,7 @@ public sealed class TrayApp : ApplicationContext
         _enabled = Store.LoadGames().Where(g => g.Enabled && g.InstallDir.Length > 3).ToList();
         _hotkeys.Register(HotkeyPause, _s.HotkeyPause);
         _hotkeys.Register(HotkeyRegion, _s.HotkeyRegion);
+        ApplyLights();
         if (settingsChanged && _pipe != null) StopPipe(); // restarted with new settings on this tick
     }
 
@@ -120,6 +122,16 @@ public sealed class TrayApp : ApplicationContext
             UpdateStatus();
         }
         catch (Exception ex) { Log.Error("tick", ex); }
+    }
+
+    void ApplyLights()
+    {
+        try
+        {
+            if (_s.LightsOn) { _lights ??= new Lights.LightService(); _lights.Apply(_s); }
+            else if (_lights != null) { _lights.Dispose(); _lights = null; }
+        }
+        catch (Exception ex) { Log.Error("lights", ex); }
     }
 
     void StopPipe()
@@ -169,6 +181,7 @@ public sealed class TrayApp : ApplicationContext
     protected override void ExitThreadCore()
     {
         StopPipe();
+        _lights?.Dispose();
         _icon.Visible = false;
         _icon.Dispose();
         _hotkeys.DestroyHandle();
