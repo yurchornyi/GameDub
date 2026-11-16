@@ -13,9 +13,10 @@ namespace GameDub.Lights;
 
 /// <summary>
 /// Joystick lighting, owned by the tray service. A dim idle glow in the Windows accent color, and on top of it
-/// at most one event at a time, by priority: a sound effect flash, low battery, overheating, the charger, a game download.
+/// at most one event at a time, by priority: a sound effect, a heartbeat, low battery, overheating, the charger, a game download.
 /// Games listed in <see cref="AppSettings.LightsSkipGames"/>, and any game that takes the lamps itself through
 /// Windows Dynamic Lighting, are left alone. Dark screen: lights off, except a running download.
+/// The console on a TV (an external display active): lights, rumble and listening off, the sticks are out of sight.
 /// Switched off in the settings, the tray disposes this, and Windows' own lighting effect comes back.
 /// </summary>
 public sealed class LightService : IDisposable
@@ -23,12 +24,12 @@ public sealed class LightService : IDisposable
     // Colors as the stick LEDs show them: their green is far brighter than their red, so warm colors carry little
     // green (a light orange #FFB068 showed as green on the ROG Xbox Ally X, 16.11).
     static readonly Rgb Red = Rgb.Hex(0xFF0800), Orange = Rgb.Hex(0xFF2A00), Yellow = Rgb.Hex(0xFF6A00),
-        Green = Rgb.Hex(0x10FF30), Blue = Rgb.Hex(0x0020FF);
+        Green = Rgb.Hex(0x10FF30), Blue = Rgb.Hex(0x0020FF), Lightning = Rgb.Hex(0x9080FF);
 
     // Every effect rises softly, holds, then fades on a curve that looks even to the eye, 30 frames a second.
-    const int FrameMs = 33, SirenMs = 2400, SirenPeriod = 1200;
+    const int FrameMs = 33, SirenMs = 2400, SirenPeriod = 1200, HeartPeriod = 1000, HeartDub = 250;
     static readonly Pulse ImpactPulse = new(120, 600, 900), HornPulse = new(100, 350, 700), ChargePulse = new(150, 600, 900),
-        SirenEnvelope = new(150, SirenMs - 550, 400);
+        SirenEnvelope = new(150, SirenMs - 550, 400), ThunderPulse = new(40, 150, 900), HeartBeat = new(60, 60, 220);
 
     /// <summary>Brightness 0..1 of a one-shot effect over time: smooth rise, hold, then a squared fall
     /// (LED light looks linear to the eye only on a curve; a straight fall seems to hang, then drop).</summary>
@@ -54,8 +55,11 @@ public sealed class LightService : IDisposable
 
     // one-shot effect
     long _fxStart; int _fxMs; SoundKind? _fx; double _fxStrength;
+    // a heartbeat heard in the game: beats from _heartStart until _heartUntil (the end of a beat)
+    long _heartStart, _heartUntil;
     // states
-    volatile bool _downloading, _downloaded, _batteryLow, _hot, _skip, _charging;
+    volatile bool _downloading, _downloaded, _batteryLow, _hot, _skip, _charging, _docked;
+    int _dockLogged = -1;
     bool _skipShown;
     long _chargeFlashStart = -1;
     Rgb _accent = Rgb.Hex(0x0078D4);
@@ -64,8 +68,6 @@ public sealed class LightService : IDisposable
     long _lastInputTick; uint _lastPadPacket;
     long _heatTick;
     string _demo = ""; long _demoUntil;
-    Rgb _logged = new(-1, -1, -1); long _loggedAt;
-    static string Hex8(Rgb c) => $"#{(int)(Math.Clamp(c.R, 0, 1) * 255):X2}{(int)(Math.Clamp(c.G, 0, 1) * 255):X2}{(int)(Math.Clamp(c.B, 0, 1) * 255):X2}";
 
     public LightService()
     {
@@ -95,13 +97,22 @@ public sealed class LightService : IDisposable
 
     void OnSound(SoundKind kind, double strength)
     {
+        if (_docked) return;                  // on a TV: the sticks are out of sight and the pad in hand is another one
         AppSettings s; lock (_gate) s = _s;
         if (s.LightsRumble && !_skip) Rumble.Pulse(kind, strength);
         if (!s.LightsSound) return;
+        long now = Environment.TickCount64;
         lock (_gate)
         {
-            _fx = kind; _fxStrength = strength; _fxStart = Environment.TickCount64;
-            _fxMs = kind switch { SoundKind.Impact => ImpactPulse.Total, SoundKind.Siren => SirenMs, _ => HornPulse.Total };
+            if (kind == SoundKind.Heartbeat)
+            {
+                // beats on while the game's heart is heard, then stops at the end of a beat
+                if (now >= _heartUntil) _heartStart = now;
+                _heartUntil = _heartStart + ((now + 1500 - _heartStart) / HeartPeriod + 1) * HeartPeriod;
+                return;
+            }
+            _fx = kind; _fxStrength = strength; _fxStart = now;
+            _fxMs = kind switch { SoundKind.Impact => ImpactPulse.Total, SoundKind.Siren => SirenMs, SoundKind.Thunder => ThunderPulse.Total, _ => HornPulse.Total };
         }
     }
 
@@ -113,6 +124,9 @@ public sealed class LightService : IDisposable
             AppSettings s; lock (_gate) s = _s;
             long now = Environment.TickCount64;
             _sound?.FollowDefaultDevice();
+            _docked = Dock.OnTv();
+            if ((_docked ? 1 : 0) != _dockLogged) { _dockLogged = _docked ? 1 : 0; Log.Write(_docked ? "lights: console on a TV, lights and rumble off" : "lights: handheld"); }
+            if (_sound is { } snd) snd.Paused = _docked || _display.Off;
             if (Input.Touched(ref _lastInputTick, ref _lastPadPacket)) _downloaded = false; // XInput is slow for empty slots: once a second
             if (now % 60000 < 1000) _accent = ReadAccent();
             _skip = s.LightsSkipGames.Count > 0 && ForegroundExe() is string exe && s.LightsSkipGames.Any(g => exe.Equals(g, StringComparison.OrdinalIgnoreCase));
@@ -144,7 +158,7 @@ public sealed class LightService : IDisposable
 
     /// <summary>
     /// Show one effect on request, for the owner to see them one by one: write its name to data\lights-demo.txt
-    /// (impact, siren, horn, battery, charge, download, downloaded, heat). The file is deleted when read.
+    /// (impact, siren, horn, thunder, heartbeat, battery, charge, download, downloaded, heat). The file is deleted when read.
     /// </summary>
     void Demo(long now)
     {
@@ -160,6 +174,8 @@ public sealed class LightService : IDisposable
                 case "impact": OnSound(SoundKind.Impact, 1); break;
                 case "siren": OnSound(SoundKind.Siren, 1); break;
                 case "horn": OnSound(SoundKind.Horn, 1); break;
+                case "thunder": OnSound(SoundKind.Thunder, 1); break;
+                case "heartbeat": lock (_gate) { _heartStart = now; _heartUntil = now + 6 * HeartPeriod; } break;
                 case "charge": _chargeFlashStart = now; break;
                 case "downloaded": _downloaded = true; break;
             }
@@ -186,11 +202,6 @@ public sealed class LightService : IDisposable
             if (!_lights.Available) return;           // Windows gave the lamps to the foreground app
 
             var (l, r) = Render(s, now);
-            if (l != _logged && now - _loggedAt > 500)
-            {
-                _logged = l; _loggedAt = now;
-                Log.Write($"lights: show {Hex8(l)} / {Hex8(r)} (dark={_display.Off}, downloading={_downloading}, done={_downloaded}, low={_batteryLow})");
-            }
             _lights.Show(l, r);
         }
         catch (Exception ex) { Log.Error("lights frame", ex); }
@@ -201,6 +212,7 @@ public sealed class LightService : IDisposable
         double t = now / 1000.0;
         Rgb idle = _accent.Scale(s.LightsBase / 100.0);
         bool dark = _display.Off;
+        if (_docked) return (Rgb.Off, Rgb.Off);
 
         // 1. sound effect: over everything
         SoundKind? fx; long fxStart; int fxMs; double strength;
@@ -217,21 +229,32 @@ public sealed class LightService : IDisposable
                     // police lights: red on the left and blue on the right swell and ebb in turn
                     double w = 0.5 - 0.5 * Math.Cos(2 * Math.PI * age / SirenPeriod), env = k * SirenEnvelope.At(age);
                     return (Rgb.Mix(idle, Red, env * w * w), Rgb.Mix(idle, Blue, env * (1 - w) * (1 - w)));
+                case SoundKind.Thunder:
+                    var z = Rgb.Mix(idle, Lightning.Scale(k), ThunderPulse.At(age));
+                    return (z, z);
                 default:
                     var h = Rgb.Mix(idle, Yellow.Scale(k), HornPulse.At(age));
                     return (h, h);
             }
         }
-        // 2. battery under 10 % and overheating: slow breathing for 3 s of every 20
+        // 2. a heartbeat in the game (low health in many games): a dim red lub-dub once a second while it is heard
+        long hs, hu; lock (_gate) { hs = _heartStart; hu = _heartUntil; }
+        if (!dark && now < hu)
+        {
+            long p = (now - hs) % HeartPeriod;
+            var c = Rgb.Mix(idle, Red.Scale(0.6), Math.Max(HeartBeat.At(p), 0.6 * HeartBeat.At(p - HeartDub)));
+            return (c, c);
+        }
+        // 3. battery under 10 % and overheating: slow breathing for 3 s of every 20
         bool cycle = (now / 1000) % 20 < 3 || now < _demoUntil; // a demo breathes all the time
         if (_batteryLow && cycle) { var c = Red.Scale(Breath(t, 3) * 0.8); return (c, c); }
         if (_hot && cycle) { var c = Orange.Scale(Breath(t, 3) * 0.7); return (c, c); }
-        // 3. charger plugged in: one green flash
+        // 4. charger plugged in: one green flash
         if (_chargeFlashStart > 0 && now - _chargeFlashStart < ChargePulse.Total) { var c = Rgb.Mix(idle, Green, ChargePulse.At(now - _chargeFlashStart)); return (c, c); }
-        // 4. downloads: blue breathing while it runs, green when it is done (until he touches the console)
+        // 5. downloads: blue breathing while it runs, green when it is done (until he touches the console)
         if (_downloading) { var c = Blue.Scale(0.1 + 0.3 * Breath(t, 4)); return (c, c); }
         if (_downloaded) { var c = Green.Scale(0.35); return (c, c); }
-        // 5. idle glow; nothing on a dark screen
+        // 6. idle glow; nothing on a dark screen
         return dark ? (Rgb.Off, Rgb.Off) : (idle, idle);
     }
 
@@ -268,7 +291,7 @@ public sealed class LightService : IDisposable
 
 /// <summary>
 /// A short rumble on the built-in gamepad for a sound effect: heavy and low for an impact, light for a horn,
-/// nothing for a siren. Any app may set XInput vibration; it stops by itself after the pulse.
+/// nothing for the rest (a siren, a heartbeat, thunder). Any app may set XInput vibration; it stops by itself after the pulse.
 /// </summary>
 static class Rumble
 {
@@ -276,7 +299,7 @@ static class Rumble
 
     public static void Pulse(SoundKind kind, double strength)
     {
-        if (kind == SoundKind.Siren) return;
+        if (kind is not (SoundKind.Impact or SoundKind.Horn)) return;
         int pad = -1;
         for (int i = 0; i < 4 && pad < 0; i++) if (Native.XInputGetState(i, out _) == 0) pad = i;
         if (pad < 0) return;
@@ -317,6 +340,38 @@ static class Input
                 touched = true;
         }
         return touched;
+    }
+}
+
+/// <summary>
+/// The console on a TV or a monitor: an external display is active, alone or next to the built-in panel. Then the
+/// sticks are out of sight and the game is played with another pad. Asks Windows for the active display paths.
+/// </summary>
+static class Dock
+{
+    [DllImport("user32.dll")] static extern int GetDisplayConfigBufferSizes(uint flags, out uint paths, out uint modes);
+    [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint flags, ref uint paths, [Out] byte[] pathInfo, ref uint modes, [Out] byte[] modeInfo, IntPtr topology);
+    const uint OnlyActivePaths = 2;
+    // DISPLAYCONFIG_PATH_INFO is 72 bytes, DISPLAYCONFIG_MODE_INFO 64; the target's outputTechnology sits at byte 36
+    const int PathSize = 72, ModeSize = 64, TechOffset = 36;
+    // a built-in panel: INTERNAL, DISPLAYPORT_EMBEDDED, UDI_EMBEDDED
+    const uint Internal = 0x80000000, DisplayPortEmbedded = 11, UdiEmbedded = 13;
+
+    public static bool OnTv()
+    {
+        try
+        {
+            if (GetDisplayConfigBufferSizes(OnlyActivePaths, out uint np, out uint nm) != 0 || np == 0) return false;
+            var paths = new byte[np * PathSize]; var modes = new byte[nm * ModeSize];
+            if (QueryDisplayConfig(OnlyActivePaths, ref np, paths, ref nm, modes, IntPtr.Zero) != 0) return false;
+            for (int i = 0; i < np; i++)
+            {
+                uint tech = BitConverter.ToUInt32(paths, i * PathSize + TechOffset);
+                if (tech != Internal && tech != DisplayPortEmbedded && tech != UdiEmbedded) return true;
+            }
+            return false;
+        }
+        catch { return false; }
     }
 }
 
