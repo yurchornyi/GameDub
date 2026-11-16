@@ -87,6 +87,9 @@ public sealed class AppSettings
     // Games that drive the lights themselves: GameDub stays off while one is in front (exe names without .exe).
     public List<string> LightsSkipGames { get; set; } = new() { "eurotrucks2", "amtrucks" };
 
+    // Launchers out of the way (Tray\QuietLaunchers): no start with Windows, never over the game, closed after it.
+    public bool QuietLaunchers { get; set; } = true;
+
     public void NormalizeApiKeys()
     {
         GoogleApiKeys = CleanApiKeys(GoogleApiKeys, GoogleApiKey);

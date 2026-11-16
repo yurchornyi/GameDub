@@ -32,6 +32,7 @@ public sealed class TrayApp : ApplicationContext
     volatile IntPtr _hwnd;
     RegionEditor? _editor;
     Lights.LightService? _lights;
+    QuietLaunchers? _quiet;
     string _lastStatus = "";
 
     public static int Run()
@@ -96,6 +97,7 @@ public sealed class TrayApp : ApplicationContext
         _hotkeys.Register(HotkeyPause, _s.HotkeyPause);
         _hotkeys.Register(HotkeyRegion, _s.HotkeyRegion);
         ApplyLights();
+        ApplyQuiet();
         if (settingsChanged && _pipe != null) StopPipe(); // restarted with new settings on this tick
     }
 
@@ -104,6 +106,7 @@ public sealed class TrayApp : ApplicationContext
         try
         {
             Reload();
+            _quiet?.Tick();
             var hit = _enabled.Count == 0 ? null : _matcher.FindRunning(_enabled);
             if (hit == null)
             {
@@ -133,6 +136,20 @@ public sealed class TrayApp : ApplicationContext
             else if (_lights != null) { _lights.Dispose(); _lights = null; }
         }
         catch (Exception ex) { Log.Error("lights", ex); }
+    }
+
+    void ApplyQuiet()
+    {
+        try
+        {
+            if (_s.QuietLaunchers) _quiet ??= new QuietLaunchers();
+            else
+            {
+                _quiet?.Dispose(); _quiet = null;
+                QuietLaunchers.RestoreAutostart();   // nothing to do unless GameDub took some out of startup
+            }
+        }
+        catch (Exception ex) { Log.Error("quiet launchers", ex); }
     }
 
     void StopPipe()
@@ -183,6 +200,7 @@ public sealed class TrayApp : ApplicationContext
     {
         StopPipe();
         _lights?.Dispose();
+        _quiet?.Dispose();
         _icon.Visible = false;
         _icon.Dispose();
         _hotkeys.DestroyHandle();
