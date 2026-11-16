@@ -106,9 +106,9 @@ public sealed class LightService : IDisposable
 
             var p = SystemInformation.PowerStatus;
             bool charging = p.PowerLineStatus == PowerLineStatus.Online;
-            if (charging && !_charging && s.LightsBattery) _chargeFlashStart = now;
+            if (charging && !_charging && s.LightsCharging) _chargeFlashStart = now;
             _charging = charging;
-            _batteryLow = s.LightsBattery && !charging && p.BatteryLifePercent is > 0 and < 0.2f;
+            _batteryLow = s.LightsBatteryLow && !charging && p.BatteryLifePercent is > 0 and < 0.2f;
 
             if (s.LightsHeat && now - _heatTick > 10_000) { _heatTick = now; _hot = Thermal.MaxCelsius() >= 85; }
             if (!s.LightsHeat) _hot = false;
