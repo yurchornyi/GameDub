@@ -41,9 +41,9 @@ public sealed class SoundFx : IDisposable
     const int OnsetGap = Rate * 60 / 1000;  // a fast gun fires 10-15 times a second
     const int StaleMs = 250;                // a cut the model reaches later than this is dropped: late is worse than missed
     // Real hits only: "Slam", "Thump, thud" and "Burst, pop" also name doors, footsteps and bubbles; "Bang" too (a car
-    // door in GTA 5 flashed as a blast, 16.11)
-    static readonly string[] ImpactNames = { "Explosion", "Fireworks", "Firecracker", "Eruption", "Boom", "Smash, crash",
-        "Breaking", "Shatter" };
+    // door in GTA 5 flashed as a blast, 16.11); "Fireworks", "Firecracker" and "Eruption" name crackles and rumbles that
+    // are not there (GTA 5, 16.11: "Fireworks" 0.68 on nothing). Game blasts read as "Explosion" or "Boom".
+    static readonly string[] ImpactNames = { "Explosion", "Boom", "Smash, crash", "Breaking", "Shatter" };
     // doors and knocks: when they sound stronger than a blast, it was a door
     static readonly string[] DoorNames = { "Door", "Sliding door", "Slam", "Knock", "Tap", "Thump, thud", "Bang" };
     static readonly string[] GunNames = { "Gunshot, gunfire", "Machine gun", "Fusillade", "Artillery fire", "Cap gun" };
