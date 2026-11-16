@@ -13,7 +13,7 @@ namespace GameDub.Lights;
 
 /// <summary>
 /// Joystick lighting, owned by the tray service. A dim idle glow in the Windows accent color, and on top of it
-/// at most one event at a time, by priority: a sound effect, a heartbeat, low battery, overheating, the charger, a game download.
+/// at most one event at a time, by priority: a sound effect, low battery, overheating, the charger, a game download.
 /// Games listed in <see cref="AppSettings.LightsSkipGames"/>, and any game that takes the lamps itself through
 /// Windows Dynamic Lighting, are left alone, unless <see cref="AppSettings.LightsOverGames"/> keeps them ours.
 /// Dark screen: lights off, except a running download.
@@ -27,16 +27,16 @@ public sealed class LightService : IDisposable
     // Colors as the stick LEDs show them: their green is far brighter than their red, so warm colors carry little
     // green (a light orange #FFB068 showed as green on the ROG Xbox Ally X, 16.11).
     static readonly Rgb Red = Rgb.Hex(0xFF0800), Orange = Rgb.Hex(0xFF2A00), Yellow = Rgb.Hex(0xFF6A00),
-        Green = Rgb.Hex(0x10FF30), Blue = Rgb.Hex(0x0020FF), Lightning = Rgb.Hex(0xCC66FF); // cold white on these LEDs
+        Green = Rgb.Hex(0x10FF30), Blue = Rgb.Hex(0x0020FF);
 
     // Every effect rises softly and fades on a curve that looks even to the eye, 30 frames a second. No fixed lengths
     // (owner, 16.11): an impact is as long and as bright as it is hard (a touch 0.4 s, a heavy crash 1.6 s); a siren,
-    // a horn and a heartbeat light while they are heard and go out right after. Each effect has its own shape, so it
-    // reads even where colors look alike: one pulse (impact), steady yellow (horn), two sharp strokes (thunder),
-    // a lub-dub (heartbeat), red and blue in turn (siren), slow breathing (states).
-    const int FrameMs = 33, SirenPeriod = 800, ShiftPeriod = 500, ShiftGap = 180, HeartPeriod = 1000, HeartDub = 250, ThunderMs = 700;
+    // a horn light while they are heard and go out right after. Each effect has its own shape, so it reads even where
+    // colors look alike: one pulse (impact), a quick blink (shot), steady yellow (horn), red and blue in turn (siren),
+    // slow breathing (states).
+    const int FrameMs = 33, SirenPeriod = 800, ShiftPeriod = 500, ShiftGap = 180;
     const int HeardHold = 700; // a sound heard again within this keeps its light on: the model looks every 480 ms
-    static readonly Pulse ChargePulse = new(150, 600, 900), HeartBeat = new(60, 60, 220), ShiftBlink = new(20, 60, 80),
+    static readonly Pulse ChargePulse = new(150, 600, 900), ShiftBlink = new(20, 60, 80),
         ShotPulse = new(10, 30, 150); // one shot: a quick orange blink, so a burst reads as separate shots
     /// <summary>An impact by its strength 0..1: 0.4 s and dim for a touch, 1.6 s and bright for a heavy crash.</summary>
     static Pulse ImpactPulse(double s) => new(60 + (int)(60 * s), 80 + (int)(520 * s), 260 + (int)(640 * s));
@@ -71,8 +71,8 @@ public sealed class LightService : IDisposable
     // one-shot effect
     long _fxStart; int _fxMs; SoundKind? _fx; double _fxStrength;
     long _shotStart; double _shotStrength; // the last shot: its own short pulse, over an impact's longer one
-    // a heartbeat, a siren or a horn heard in the game: lit from its start until its until, moved on while it is heard
-    long _heartStart, _heartUntil, _sirenStart, _sirenUntil, _hornStart, _hornUntil; double _hornStrength;
+    // a siren or a horn heard in the game: lit from its start until its until, moved on while it is heard
+    long _sirenStart, _sirenUntil, _hornStart, _hornUntil; double _hornStrength;
     // states
     volatile bool _downloading, _downloaded, _batteryLow, _hot, _skip, _charging, _docked, _racingGame;
     int _dockLogged = -1;
@@ -141,11 +141,6 @@ public sealed class LightService : IDisposable
                 case SoundKind.Shot:
                     _shotStart = now; _shotStrength = strength;
                     return;
-                case SoundKind.Heartbeat:
-                    // beats on while the game's heart is heard, then stops at the end of a beat
-                    if (now >= _heartUntil) _heartStart = now;
-                    _heartUntil = _heartStart + ((now + HeardHold - _heartStart) / HeartPeriod + 1) * HeartPeriod;
-                    return;
                 case SoundKind.Siren:
                     // police lights while the siren wails, out right after it
                     if (now >= _sirenUntil) _sirenStart = now;
@@ -158,7 +153,7 @@ public sealed class LightService : IDisposable
                     return;
             }
             _fx = kind; _fxStrength = strength; _fxStart = now;
-            _fxMs = kind == SoundKind.Impact ? ImpactPulse(strength).Total : ThunderMs;
+            _fxMs = ImpactPulse(strength).Total;
         }
     }
 
@@ -235,7 +230,7 @@ public sealed class LightService : IDisposable
 
     /// <summary>
     /// Show one effect on request, for the owner to see them one by one: write its name to data\lights-demo.txt
-    /// (impact, bump: a light one, siren, horn, thunder, heartbeat, brake, shift, battery, charge, download, downloaded, heat). The file is deleted when read.
+    /// (impact, bump: a light one, siren, horn, brake, shift, battery, charge, download, downloaded, heat). The file is deleted when read.
     /// </summary>
     void Demo(long now)
     {
@@ -252,8 +247,6 @@ public sealed class LightService : IDisposable
                 case "bump": OnSound(SoundKind.Impact, 0); break;
                 case "siren": lock (_gate) { _sirenStart = now; _sirenUntil = now + 3 * SirenPeriod; } break;
                 case "horn": lock (_gate) { _hornStart = now; _hornUntil = now + 1000; _hornStrength = 1; } break;
-                case "thunder": OnSound(SoundKind.Thunder, 1); break;
-                case "heartbeat": lock (_gate) { _heartStart = now; _heartUntil = now + 6 * HeartPeriod; } break;
                 case "charge": _chargeFlashStart = now; break;
                 case "downloaded": _downloaded = true; break;
             }
@@ -298,11 +291,6 @@ public sealed class LightService : IDisposable
         long sAge; double sk; lock (_gate) { sAge = now - _shotStart; sk = _shotStrength; }
         double shot = !dark && sAge < ShotPulse.Total ? Felt(sk, 0.15) * ShotPulse.At(sAge) : 0;
         bool fxOn = fx != null && !dark && now - fxStart < fxMs;
-        if (fxOn && fx == SoundKind.Thunder)
-        {
-            var z = Rgb.Mix(idle, Lightning.Scale(Math.Max(Felt(strength, 0.25), 0.8)), Strike(now - fxStart));
-            return (z, z);
-        }
         if (fxOn || shot > 0)
         {
             // an impact's pulse and a shot's blink, both orange: the brighter one shows
@@ -328,14 +316,6 @@ public sealed class LightService : IDisposable
         }
         // 2b. racing: brake lights, and Forza's shift light
         if (!dark && s.LightsRacing && RaceLight(now) is Rgb race) return (race, race);
-        // 2c. a heartbeat in the game (low health in many games): a dim red lub-dub once a second while it is heard
-        long hs, hu; lock (_gate) { hs = _heartStart; hu = _heartUntil; }
-        if (!dark && now < hu)
-        {
-            long p = (now - hs) % HeartPeriod;
-            var c = Rgb.Mix(idle, Red.Scale(0.6), Math.Max(HeartBeat.At(p), 0.6 * HeartBeat.At(p - HeartDub)));
-            return (c, c);
-        }
         // 3. battery under 10 % and overheating: slow breathing for 3 s of every 20
         bool cycle = (now / 1000) % 20 < 3 || now < _demoUntil; // a demo breathes all the time
         if (_batteryLow && cycle) { var c = Red.Scale(Breath(t, 3) * 0.8); return (c, c); }
@@ -348,17 +328,6 @@ public sealed class LightService : IDisposable
         // 6. idle glow; nothing on a dark screen
         return dark ? (Rgb.Off, Rgb.Off) : (idle, idle);
     }
-
-    /// <summary>Lightning: two sharp strokes, then a quick fade (a soft rise and a long fall looked like a glow, not
-    /// lightning, 16.11).</summary>
-    static double Strike(long age) => age switch
-    {
-        < 70 => 1,
-        < 160 => 0.05,
-        < 280 => 1,
-        < ThunderMs => Math.Pow(1 - (age - 280) / (double)(ThunderMs - 280), 2),
-        _ => 0
-    };
 
     /// <summary>
     /// Racing lights. With Forza's telemetry coming in, only it counts (the trigger is not looked at, so nothing lights

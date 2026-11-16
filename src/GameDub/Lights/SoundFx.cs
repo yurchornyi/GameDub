@@ -12,14 +12,15 @@ using NAudio.Wave;
 
 namespace GameDub.Lights;
 
-public enum SoundKind { Impact, Siren, Horn, Heartbeat, Thunder, Shot }
+public enum SoundKind { Impact, Siren, Horn, Shot }
 
 /// <summary>
 /// Listens to what Windows plays (speakers or headphones alike: the loopback of the default output) and reports
-/// sound effects only: explosions, shots, crashes and breaking glass, sirens and alarms, horns, a heartbeat (low health
-/// in many games) and thunder. Speech and music are ignored. YAMNet (Google, AudioSet, 521 classes) names the sounds,
+/// sound effects only: explosions, shots, crashes and breaking glass, sirens and alarms, horns. Speech and music are
+/// ignored. Thunder and heartbeats were dropped (16.11): in Far Cry 3 the model heard both in music and ambience,
+/// scoring up to 0.9, with neither in the game. YAMNet (Google, AudioSet, 521 classes) names the sounds,
 /// in two ways:
-/// - Sudden sounds (shots, explosions, crashes, breaking glass, a thunder clap) are judged one by one, at once: 60 ms
+/// - Sudden sounds (shots, explosions, crashes, breaking glass) are judged one by one, at once: 60 ms
 ///   after every sharp onset (a jump in loudness between 10 ms blocks) the model is asked about the second that ends
 ///   there. A shot needs gunfire over 0.2, more than any blast or footsteps, and a loudness of at least a third of the
 ///   loudest shot lately, so a footstep amid a fight stays dark. Tuned on recordings of Call of Duty, GTA 5 and
@@ -27,7 +28,7 @@ public enum SoundKind { Impact, Siren, Horn, Heartbeat, Thunder, Shot }
 ///   speech and music do not; a race flashes no shots. Tried and dropped: looks twice a second (up to a second late),
 ///   a cut alone in silence (the model averages over its second: "Silence"), a cut repeated over the second
 ///   (footsteps then read as gunfire).
-/// - Lasting sounds (sirens, horns, a heartbeat, an engine) are looked at twice a second over the last second. A siren
+/// - Lasting sounds (sirens, horns, an engine) are looked at twice a second over the last second. A siren
 ///   is shown only once two looks in a row hear it, and kept while it is heard within 2.5 s: in GTA 5 the model heard
 ///   police sirens on and off, and the lights flickered.
 /// A loudness detector without the model was tried for crashes (16.11) and dropped: it flashed on starts, menus and
@@ -44,7 +45,7 @@ public sealed class SoundFx : IDisposable
         "Breaking", "Shatter" };
     static readonly string[] GunNames = { "Gunshot, gunfire", "Machine gun", "Fusillade", "Artillery fire", "Cap gun" };
     static readonly string[] FootNames = { "Walk, footsteps", "Run", "Shuffle" };
-    const double GunScore = 0.2, ShotLoudness = 0.35, ImpactScore = 0.35, ThunderScore = 0.35, SirenScore = 0.3, SirenKeep = 0.25;
+    const double GunScore = 0.2, ShotLoudness = 0.35, ImpactScore = 0.35, SirenScore = 0.3, SirenKeep = 0.25;
     static readonly string[] SirenNames = { "Siren", "Civil defense siren", "Police car (siren)", "Ambulance (siren)", "Fire engine, fire truck (siren)",
         "Alarm", "Car alarm", "Smoke detector, smoke alarm", "Fire alarm" };
     static readonly string[] HornNames = { "Vehicle horn, car horn, honking", "Air horn, truck horn", "Train horn", "Foghorn" };
@@ -52,16 +53,13 @@ public sealed class SoundFx : IDisposable
     static readonly string[] EngineNames = { "Vehicle", "Motor vehicle (road)", "Car", "Race car, auto racing", "Truck", "Motorcycle",
         "Engine", "Light engine (high frequency)", "Medium engine (mid frequency)", "Heavy engine (low frequency)", "Idling",
         "Accelerating, revving, vroom", "Tire squeal", "Skidding" };
-    static readonly string[] HeartNames = { "Heart sounds, heartbeat", "Heart murmur" };
-    // "Thunderstorm" is rain as well, heard for minutes: only the clap counts
-    static readonly string[] ThunderNames = { "Thunder" };
 
     /// <summary>Kind and strength of a detected effect: 0 just over its threshold, 1 as sure as the model gets.</summary>
     public event Action<SoundKind, double>? Effect;
 
     readonly InferenceSession _model;
     readonly string _input, _output;
-    readonly int[] _impact, _gun, _foot, _siren, _horn, _heart, _thunder, _engine;
+    readonly int[] _impact, _gun, _foot, _siren, _horn, _engine;
     readonly float[] _ring = new float[Rate * 2];
     readonly object _gate = new();
     int _write;
@@ -86,10 +84,10 @@ public sealed class SoundFx : IDisposable
     // sudden sounds over a minute, for the log
     int _cutsMade, _judged, _late, _fast, _shots, _impacts; double _clipGun, _clipImpact, _judgeMs;
     readonly Dictionary<string, int> _clipTops = new();
-    long _lastEffectTick, _lastThunderTick, _sirenOnUntil; bool _sirenLookPrev;
+    long _lastEffectTick, _sirenOnUntil; bool _sirenLookPrev;
     readonly long[] _lastHeard = new long[Enum.GetValues<SoundKind>().Length];
     // what was heard, for the log: strongest effect scores and the loudest top class over a minute
-    double _sumImpact, _sumGun, _sumSiren, _sumHorn, _sumHeart, _sumThunder; string _top = ""; double _topScore; int _hops; long _statTick;
+    double _sumImpact, _sumGun, _sumSiren, _sumHorn; string _top = ""; double _topScore; int _hops; long _statTick;
     string[] _names = Array.Empty<string>();
     double _peak;
 
@@ -109,7 +107,7 @@ public sealed class SoundFx : IDisposable
         var names = File.ReadAllLines(Path.Combine(ModelDir, "yamnet_class_map.csv")).Skip(1)
             .Select(l => l.Split(',', 3)).Where(p => p.Length == 3).Select(p => (i: int.Parse(p[0]), name: p[2].Trim().Trim('"'))).ToList();
         int[] Find(string[] wanted) => names.Where(n => wanted.Contains(n.name)).Select(n => n.i).ToArray();
-        _impact = Find(ImpactNames); _gun = Find(GunNames); _foot = Find(FootNames); _siren = Find(SirenNames); _horn = Find(HornNames); _heart = Find(HeartNames); _thunder = Find(ThunderNames); _engine = Find(EngineNames);
+        _impact = Find(ImpactNames); _gun = Find(GunNames); _foot = Find(FootNames); _siren = Find(SirenNames); _horn = Find(HornNames); _engine = Find(EngineNames);
         _names = new string[521];
         foreach (var n in names) if (n.i >= 0 && n.i < 521) _names[n.i] = n.name;
 
@@ -117,7 +115,7 @@ public sealed class SoundFx : IDisposable
         _model = new InferenceSession(Path.Combine(ModelDir, "yamnet.onnx"), opts);
         _input = _model.InputMetadata.Keys.First();
         _output = _model.OutputMetadata.First(o => o.Value.Dimensions.LastOrDefault() == 521).Key;
-        Log.Write($"soundfx: model ready ({_impact.Length} impact, {_gun.Length} gunfire, {_siren.Length} siren, {_horn.Length} horn, {_heart.Length} heart, {_thunder.Length} thunder classes)");
+        Log.Write($"soundfx: model ready ({_impact.Length} impact, {_gun.Length} gunfire, {_siren.Length} siren, {_horn.Length} horn classes)");
         _hop = new Timer(_ => Classify(), null, HopMs, HopMs);
         _judge = new Thread(JudgeLoop) { IsBackground = true, Name = "soundfx judge" };
         _judge.Start();
@@ -259,19 +257,18 @@ public sealed class SoundFx : IDisposable
 
     /// <summary>
     /// One sudden sound, judged on the second that ends 60 ms after it began: a shot blinks, a blast or a crash pulses,
-    /// thunder strikes; a footstep, a click, speech or music does nothing.
+    /// a footstep, a click, speech or music does nothing.
     /// </summary>
     void Judge(float[] around, double rms)
     {
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         var h = Scores(around);
-        double gun = h.Max(_gun), impact = h.Max(_impact), foot = h.Max(_foot), thunder = h.Max(_thunder);
+        double gun = h.Max(_gun), impact = h.Max(_impact), foot = h.Max(_foot);
         int top = h.Top();
         long now = Environment.TickCount64;
         double loudest; lock (_shotGate) loudest = _loudestShot;
         bool shot = gun >= GunScore && gun >= impact && gun > foot && rms >= ShotLoudness * loudest;
         bool blast = !shot && impact >= ImpactScore && impact > gun && impact > foot;
-        bool clap = !shot && !blast && thunder >= ThunderScore;
         lock (_clipTops)
         {
             _judged++; _judgeMs += System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
@@ -281,7 +278,6 @@ public sealed class SoundFx : IDisposable
         }
         if (shot) Shoot(rms, now);
         else if (blast) { _impacts++; Fire(SoundKind.Impact, impact, ImpactScore, now); }
-        else if (clap && now - _lastThunderTick > 4000) { _lastThunderTick = now; Fire(SoundKind.Thunder, thunder, ThunderScore, now); }
     }
 
     /// <summary>The model's scores over one window, each class at its strongest frame.</summary>
@@ -334,39 +330,35 @@ public sealed class SoundFx : IDisposable
             var scores = res.First().AsTensor<float>();
             int frames = scores.Dimensions[0];
             double Max(int[] idx) { double m = 0; for (int f = 0; f < frames; f++) foreach (var i in idx) m = Math.Max(m, scores[f, i]); return m; }
-            double impact = Max(_impact), gun = Max(_gun), siren = Max(_siren), horn = Max(_horn), heart = Max(_heart), thunder = Max(_thunder);
+            double impact = Max(_impact), gun = Max(_gun), siren = Max(_siren), horn = Max(_horn);
             long now = Environment.TickCount64;
             if (Max(_engine) > 0.3) Interlocked.Exchange(ref _engineTick, now);
-            Stats(scores, frames, impact, gun, siren, horn, heart, thunder, now);
+            Stats(scores, frames, impact, gun, siren, horn, now);
             // Sudden sounds are judged one by one as they come (Judge); a look would show them up to a second late.
-            // a siren, a horn and a heartbeat fire every look while they last: their lights follow the sound
+            // a siren and a horn fire every look while they last: their lights follow the sound
             // a siren: two looks in a row to start, then on while heard within 2.5 s, so it neither flickers nor starts on a blip
             if (siren >= SirenScore && _sirenLookPrev) _sirenOnUntil = now + 2500;
             _sirenLookPrev = siren >= SirenScore;
             if (siren >= SirenKeep && now < _sirenOnUntil) _sirenOnUntil = now + 2500;
             if (now < _sirenOnUntil) Fire(SoundKind.Siren, Math.Max(siren, SirenScore), SirenScore, now);
             if (horn > 0.4) Fire(SoundKind.Horn, horn, 0.4, now);
-            if (heart > 0.3) Fire(SoundKind.Heartbeat, heart, 0.3, now);
-            // thunder rolls on after its clap: a look still catches one the clap's cut missed
-            if (thunder > ThunderScore && now - _lastThunderTick > 4000) { _lastThunderTick = now; Fire(SoundKind.Thunder, thunder, ThunderScore, now); }
         }
         catch (Exception ex) { Log.Error("soundfx classify", ex); }
         finally { Interlocked.Exchange(ref _busy, 0); }
     }
 
-    void Stats(Tensor<float> scores, int frames, double impact, double gun, double siren, double horn, double heart, double thunder, long now)
+    void Stats(Tensor<float> scores, int frames, double impact, double gun, double siren, double horn, long now)
     {
         _hops++;
         lock (_shotGate) _loudestShot = Math.Max(0.05, _loudestShot * 0.97);  // the reference for shot strength forgets slowly (about 30 s)
         _sumImpact = Math.Max(_sumImpact, impact); _sumGun = Math.Max(_sumGun, gun); _sumSiren = Math.Max(_sumSiren, siren); _sumHorn = Math.Max(_sumHorn, horn);
-        _sumHeart = Math.Max(_sumHeart, heart); _sumThunder = Math.Max(_sumThunder, thunder);
         for (int i = 0; i < 521; i++)
         {
             double v = 0; for (int f = 0; f < frames; f++) v = Math.Max(v, scores[f, i]);
             if (v > _topScore) { _topScore = v; _top = _names[i] ?? i.ToString(); }
         }
         if (now - _statTick < 60_000) return; // a summary a minute, for tuning from the log
-        Log.Write($"soundfx: {_hops} looks, max impact {_sumImpact:F2} gunfire {_sumGun:F2} siren {_sumSiren:F2} horn {_sumHorn:F2} heart {_sumHeart:F2} thunder {_sumThunder:F2}, loudest «{_top}» {_topScore:F2}");
+        Log.Write($"soundfx: {_hops} looks, max impact {_sumImpact:F2} gunfire {_sumGun:F2} siren {_sumSiren:F2} horn {_sumHorn:F2}, loudest «{_top}» {_topScore:F2}");
         lock (_clipTops)
         {
             if (_cutsMade > 0)
@@ -375,7 +367,7 @@ public sealed class SoundFx : IDisposable
                     string.Join(", ", _clipTops.OrderByDescending(t => t.Value).Take(4).Select(t => $"«{t.Key}» {t.Value}")));
             _cutsMade = _judged = _late = _fast = _shots = _impacts = 0; _clipGun = _clipImpact = _judgeMs = 0; _clipTops.Clear();
         }
-        _statTick = now; _hops = 0; _sumImpact = _sumGun = _sumSiren = _sumHorn = _sumHeart = _sumThunder = _topScore = 0; _top = "";
+        _statTick = now; _hops = 0; _sumImpact = _sumGun = _sumSiren = _sumHorn = _topScore = 0; _top = "";
     }
 
     /// <summary>The strength is how far the score is over its threshold, 0..1: a faint sound gives a short dim light,
@@ -387,8 +379,8 @@ public sealed class SoundFx : IDisposable
             if (now - _lastEffectTick < 700) return; // one flash per burst of explosions, not a strobe
             _lastEffectTick = now;
         }
-        // a siren, a horn or a heartbeat comes every look while it lasts: log only its start
-        bool ongoing = kind is SoundKind.Heartbeat or SoundKind.Siren or SoundKind.Horn;
+        // a siren or a horn comes every look while it lasts: log only its start
+        bool ongoing = kind is SoundKind.Siren or SoundKind.Horn;
         ref long last = ref _lastHeard[(int)kind];
         if (!ongoing || now - last > 2000) Log.Write($"soundfx: {kind} {score:F2}");
         last = now;
