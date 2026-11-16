@@ -20,11 +20,13 @@ public enum SoundKind { Impact, Siren, Horn, Heartbeat, Thunder, Shot }
 /// in many games) and thunder. Speech and music are ignored. YAMNet (Google, AudioSet, 521 classes) names the sounds,
 /// in two ways:
 /// - Sudden sounds (shots, explosions, crashes, breaking glass, a thunder clap) are judged one by one, at once. Every
-///   sharp onset (a jump in loudness between 10 ms blocks) is cut out, 40 ms before to 100 ms after, put alone in
-///   silence, and the model names just that sound. So a shot flashes about 0.1 s after it is heard, each shot of a
-///   burst on its own, as bright as it is loud; and a footstep, a reload or a menu click names itself as what it is and
-///   flashes nothing (16.11, Call of Duty: looks twice a second were up to a second late, and onsets taken while gunfire
-///   went on flashed on footsteps).
+///   sharp onset (a jump in loudness between 10 ms blocks) is cut out, 40 ms before to 100 ms after, and the model is
+///   asked twice: about the cut repeated over its whole one-second window (what is this one sound? the model averages
+///   over its window, so a cut alone in silence read as "Silence", 16.11), and about the last second as it sounded
+///   (is there gunfire or a blast around at all?). Both must agree. So a shot flashes about 0.1 s after it is heard,
+///   each shot of a burst on its own, as bright as it is loud; and a footstep, a reload or a menu click names itself as
+///   what it is and flashes nothing (16.11, Call of Duty: looks twice a second were up to a second late, and onsets
+///   taken while gunfire went on flashed on footsteps).
 /// - Lasting sounds (sirens, horns, a heartbeat, an engine) are looked at twice a second over the last second.
 /// A loudness detector without the model was tried for crashes (16.11) and dropped: it flashed on starts, menus and
 /// gear shifts in Wreckfest.
@@ -39,7 +41,9 @@ public sealed class SoundFx : IDisposable
     static readonly string[] ImpactNames = { "Explosion", "Fireworks", "Firecracker", "Eruption", "Boom", "Bang", "Smash, crash",
         "Breaking", "Shatter" };
     static readonly string[] GunNames = { "Gunshot, gunfire", "Machine gun", "Fusillade", "Artillery fire", "Cap gun" };
-    const double GunScore = 0.3, ImpactScore = 0.35, ThunderScore = 0.35;
+    static readonly string[] FootNames = { "Walk, footsteps", "Run", "Shuffle" };
+    const double GunScore = 0.3, ImpactScore = 0.35, ThunderScore = 0.35, AroundScore = 0.2;
+    const int Fade = Rate * 5 / 1000;       // each repeat of a cut fades in and out, or the seams click like shots
     static readonly string[] SirenNames = { "Siren", "Civil defense siren", "Police car (siren)", "Ambulance (siren)", "Fire engine, fire truck (siren)",
         "Alarm", "Car alarm", "Smoke detector, smoke alarm", "Fire alarm" };
     static readonly string[] HornNames = { "Vehicle horn, car horn, honking", "Air horn, truck horn", "Train horn", "Foghorn" };
@@ -56,7 +60,7 @@ public sealed class SoundFx : IDisposable
 
     readonly InferenceSession _model;
     readonly string _input, _output;
-    readonly int[] _impact, _gun, _siren, _horn, _heart, _thunder, _engine;
+    readonly int[] _impact, _gun, _foot, _siren, _horn, _heart, _thunder, _engine;
     readonly float[] _ring = new float[Rate * 2];
     readonly object _gate = new();
     int _write;
@@ -72,7 +76,7 @@ public sealed class SoundFx : IDisposable
     long _lastOnset = long.MinValue / 2;
     readonly List<(long at, double rms)> _onsets = new();      // onsets waiting for their 100 ms after
     // cuts waiting for the model, on a thread of their own
-    readonly Queue<(float[] clip, double rms, long tick)> _cuts = new();
+    readonly Queue<(float[] clip, float[] around, double rms, long tick)> _cuts = new();
     readonly SemaphoreSlim _cutReady = new(0);
     readonly Thread _judge;
     volatile bool _stop;
@@ -104,7 +108,7 @@ public sealed class SoundFx : IDisposable
         var names = File.ReadAllLines(Path.Combine(ModelDir, "yamnet_class_map.csv")).Skip(1)
             .Select(l => l.Split(',', 3)).Where(p => p.Length == 3).Select(p => (i: int.Parse(p[0]), name: p[2].Trim().Trim('"'))).ToList();
         int[] Find(string[] wanted) => names.Where(n => wanted.Contains(n.name)).Select(n => n.i).ToArray();
-        _impact = Find(ImpactNames); _gun = Find(GunNames); _siren = Find(SirenNames); _horn = Find(HornNames); _heart = Find(HeartNames); _thunder = Find(ThunderNames); _engine = Find(EngineNames);
+        _impact = Find(ImpactNames); _gun = Find(GunNames); _foot = Find(FootNames); _siren = Find(SirenNames); _horn = Find(HornNames); _heart = Find(HeartNames); _thunder = Find(ThunderNames); _engine = Find(EngineNames);
         _names = new string[521];
         foreach (var n in names) if (n.i >= 0 && n.i < 521) _names[n.i] = n.name;
 
@@ -157,7 +161,7 @@ public sealed class SoundFx : IDisposable
         int ch = fmt.Channels, frames = bytes / 4 / ch;
         double step = fmt.SampleRate / (double)Rate;
         int avg = Math.Max(1, (int)Math.Round(step)); // box filter over one output period against aliasing
-        List<(float[] clip, double rms)>? ready = null;
+        List<(float[] clip, float[] around, double rms)>? ready = null;
         lock (_gate)
         {
             for (; _phase < frames; _phase += step)
@@ -183,10 +187,13 @@ public sealed class SoundFx : IDisposable
                 var clip = new float[PreSamples + PostSamples];
                 int start = (int)(((_write - (_samples - from)) % _ring.Length + _ring.Length) % _ring.Length);
                 for (int k = 0; k < clip.Length; k++) clip[k] = _ring[(start + k) % _ring.Length];
-                (ready ??= new()).Add((clip, rms));
+                var around = new float[Window];                       // the last second, as it sounded
+                int aStart = (_write - Window + _ring.Length) % _ring.Length;
+                for (int k = 0; k < Window; k++) around[k] = _ring[(aStart + k) % _ring.Length];
+                (ready ??= new()).Add((clip, around, rms));
             }
         }
-        if (ready != null) foreach (var (clip, rms) in ready) Hand(clip, rms);
+        if (ready != null) foreach (var (clip, around, rms) in ready) Hand(clip, around, rms);
     }
 
     /// <summary>Every 10 ms block: the loudness for the silence gate, and an onset, a jump to 1.8 times the last 50 ms.</summary>
@@ -207,7 +214,7 @@ public sealed class SoundFx : IDisposable
 
     /// <summary>A cut for the model. While the model is behind in fast fire, a sound as loud as the shot it named just
     /// before is the next shot, so a burst keeps flashing shot by shot.</summary>
-    void Hand(float[] clip, double rms)
+    void Hand(float[] clip, float[] around, double rms)
     {
         long now = Environment.TickCount64;
         bool fast = false;
@@ -218,7 +225,7 @@ public sealed class SoundFx : IDisposable
             if (!fast)
             {
                 if (_cuts.Count >= 4) { _cuts.Dequeue(); _late++; }
-                _cuts.Enqueue((clip, rms, now));
+                _cuts.Enqueue((clip, around, rms, now));
             }
         }
         if (fast) { _fast++; Shoot(rms, now); }
@@ -231,7 +238,7 @@ public sealed class SoundFx : IDisposable
         while (!_stop)
         {
             _cutReady.Wait(1000);
-            (float[] clip, double rms, long tick) cut;
+            (float[] clip, float[] around, double rms, long tick) cut;
             lock (_cuts)
             {
                 if (_cuts.Count == 0) continue;
@@ -239,25 +246,34 @@ public sealed class SoundFx : IDisposable
             }
             if (_stop) return;
             if (Environment.TickCount64 - cut.tick > StaleMs) { _late++; continue; }
-            try { Judge(cut.clip, cut.rms, wave); }
+            try { Judge(cut.clip, cut.around, cut.rms, wave); }
             catch (Exception ex) { Log.Error("soundfx judge", ex); }
         }
     }
 
-    /// <summary>One sudden sound alone in silence: what is it? A shot blinks, an explosion or a crash pulses, thunder strikes.</summary>
-    void Judge(float[] clip, double rms, float[] wave)
+    /// <summary>
+    /// One sudden sound: what is it, and is there gunfire or a blast around? A shot blinks, an explosion or a crash
+    /// pulses, thunder strikes; a footstep, a click or music does nothing.
+    /// </summary>
+    void Judge(float[] clip, float[] around, double rms, float[] wave)
     {
-        Array.Clear(wave);
-        Array.Copy(clip, 0, wave, (Window - clip.Length) / 2, clip.Length);
+        // the cut repeated over the window, each repeat faded in and out
+        for (int i = 0; i < Window; i++)
+        {
+            int k = i % clip.Length;
+            double edge = Math.Min(1, Math.Min(k, clip.Length - 1 - k) / (double)Fade);
+            wave[i] = (float)(clip[k] * edge);
+        }
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        using var res = _model.Run(new[] { NamedOnnxValue.CreateFromTensor(_input, new DenseTensor<float>(wave, new[] { Window })) }, new[] { _output });
-        var scores = res.First().AsTensor<float>();
-        int frames = scores.Dimensions[0];
-        double Max(int[] idx) { double m = 0; for (int f = 0; f < frames; f++) foreach (var i in idx) m = Math.Max(m, scores[f, i]); return m; }
-        double gun = Max(_gun), impact = Max(_impact), thunder = Max(_thunder);
-        int top = 0; double topScore = -1;
-        for (int i = 0; i < 521; i++) { double v = 0; for (int f = 0; f < frames; f++) v = Math.Max(v, scores[f, i]); if (v > topScore) { topScore = v; top = i; } }
+        var one = Scores(wave);
+        var all = Scores(around);
+        double gun = one.Max(_gun), impact = one.Max(_impact), foot = one.Max(_foot), thunder = one.Max(_thunder);
+        double gunAround = all.Max(_gun), impactAround = all.Max(_impact), thunderAround = all.Max(_thunder);
+        int top = one.Top();
         long now = Environment.TickCount64;
+        bool shot = gun >= GunScore && gun >= impact && gun > foot && gunAround >= AroundScore;
+        bool blast = !shot && impact >= ImpactScore && impact > foot && Math.Max(impactAround, gunAround) >= AroundScore;
+        bool clap = !shot && !blast && thunder >= ThunderScore && thunderAround >= AroundScore;
         lock (_clipTops)
         {
             _judged++; _judgeMs += System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
@@ -265,11 +281,33 @@ public sealed class SoundFx : IDisposable
             string name = _names[top] ?? top.ToString();
             _clipTops[name] = _clipTops.TryGetValue(name, out int n) ? n + 1 : 1;
         }
-        // a shot also scores "Bang": the stronger of the two says whether it was a shot or a blast
-        if (gun >= GunScore && gun >= impact) Shoot(rms, now);
-        else if (impact >= ImpactScore) { _impacts++; Fire(SoundKind.Impact, impact, ImpactScore, now); }
-        else if (gun >= GunScore) Shoot(rms, now);
-        else if (thunder >= ThunderScore && now - _lastThunderTick > 4000) { _lastThunderTick = now; Fire(SoundKind.Thunder, thunder, ThunderScore, now); }
+        if (Lab) Log.Write($"soundfx lab: rms {rms:F3} one «{_names[top]}» gun {gun:F2} impact {impact:F2} foot {foot:F2} | around gun {gunAround:F2} impact {impactAround:F2}" +
+            (shot ? " -> SHOT" : blast ? " -> BLAST" : clap ? " -> THUNDER" : ""));
+        if (shot) Shoot(rms, now);
+        else if (blast) { _impacts++; Fire(SoundKind.Impact, impact, ImpactScore, now); }
+        else if (clap && now - _lastThunderTick > 4000) { _lastThunderTick = now; Fire(SoundKind.Thunder, thunder, ThunderScore, now); }
+    }
+
+    /// <summary>A judging session's log of every cut, while data\lights-lab.txt exists (for tuning on the console).</summary>
+    static bool Lab => File.Exists(Path.Combine(Paths.Data, "lights-lab.txt"));
+
+    /// <summary>The model's scores over one window, each class at its strongest frame.</summary>
+    sealed class Heard
+    {
+        readonly double[] _v = new double[521];
+        public Heard(Tensor<float> scores)
+        {
+            int frames = scores.Dimensions[0];
+            for (int i = 0; i < 521; i++) { double m = 0; for (int f = 0; f < frames; f++) m = Math.Max(m, scores[f, i]); _v[i] = m; }
+        }
+        public double Max(int[] idx) { double m = 0; foreach (var i in idx) m = Math.Max(m, _v[i]); return m; }
+        public int Top() { int t = 0; for (int i = 1; i < 521; i++) if (_v[i] > _v[t]) t = i; return t; }
+    }
+
+    Heard Scores(float[] wave)
+    {
+        using var res = _model.Run(new[] { NamedOnnxValue.CreateFromTensor(_input, new DenseTensor<float>(wave, new[] { Window })) }, new[] { _output });
+        return new Heard(res.First().AsTensor<float>());
     }
 
     /// <summary>A shot's flash, as bright as the shot is loud against the loudest shot lately: the player's own about 1.</summary>
