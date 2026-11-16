@@ -200,6 +200,54 @@ public sealed class SoundFx : IDisposable
         }
     }
 
+    /// <summary>
+    /// The tuning test: every onset of a recording (the same onset rule as live) and a look every 240 ms, with the
+    /// model's scores over several windows, as CSV. Offline, as fast as the model goes.
+    /// </summary>
+    public void Dump(string rawPath, TextWriter csv)
+    {
+        var bytes = File.ReadAllBytes(rawPath);
+        var all = new float[bytes.Length / 4];
+        for (int i = 0; i < all.Length; i++) all[i] = BitConverter.ToSingle(bytes, i * 4);
+        float[] Real(long end)
+        {
+            var w = new float[Window];
+            for (int k = 0; k < Window; k++) { long j = end - Window + k; w[k] = j >= 0 && j < all.Length ? all[j] : 0; }
+            return w;
+        }
+        float[] Tiled(long at)
+        {
+            var clip = new float[PreSamples + PostSamples];
+            for (int k = 0; k < clip.Length; k++) { long j = at - PreSamples + k; clip[k] = j >= 0 && j < all.Length ? all[j] : 0; }
+            var w = new float[Window];
+            for (int i = 0; i < Window; i++)
+            {
+                int k = i % clip.Length;
+                double edge = Math.Min(1, Math.Min(k, clip.Length - 1 - k) / (double)Fade);
+                w[i] = (float)(clip[k] * edge);
+            }
+            return w;
+        }
+        string Cols(Heard h) => $"{h.Max(_gun):F3},{h.Max(_impact):F3},{h.Max(_foot):F3},{h.Max(_siren):F3},{h.Max(_horn):F3},{h.Max(_engine):F3},\"{_names[h.Top()]}\"";
+        string Head(string w) => $"{w}_gun,{w}_impact,{w}_foot,{w}_siren,{w}_horn,{w}_engine,{w}_top";
+        csv.WriteLine("kind,t,rms," + string.Join(",", new[] { "before", "a60", "a100", "a150", "center", "tiled" }.Select(Head)));
+        // onsets, as Gate finds them
+        var recent = new double[5]; int rn = 0; long last = long.MinValue / 2;
+        for (long b = 0; b + Block <= all.Length; b += Block)
+        {
+            double sum = 0; for (long j = b; j < b + Block; j++) sum += all[j] * all[j];
+            double rms = Math.Sqrt(sum / Block), before = recent.Average();
+            recent[rn++ % recent.Length] = rms;
+            if (rms < 0.01 || rms < 1.8 * before || b + Block - last < OnsetGap) continue;
+            last = b + Block;
+            csv.WriteLine($"onset,{b / (double)Rate:F3},{rms:F4}," + string.Join(",",
+                Cols(Scores(Real(b))), Cols(Scores(Real(b + Rate * 60 / 1000))), Cols(Scores(Real(b + Rate * 100 / 1000))),
+                Cols(Scores(Real(b + Rate * 150 / 1000))), Cols(Scores(Real(b + Window / 2))), Cols(Scores(Tiled(b)))));
+        }
+        for (long end = Window; end <= all.Length; end += Rate * 240 / 1000)
+            csv.WriteLine($"look,{end / (double)Rate:F3},0," + Cols(Scores(Real(end))));
+    }
+
     /// <summary>The test: plays a recording through the same path in real time (so every timing rule holds).</summary>
     public void Replay(string rawPath)
     {

@@ -98,6 +98,21 @@ public static class Program
                 lock (o) o.AppendLine("total: " + string.Join(", ", count.Select(c => $"{c.Key} {c.Value}")));
                 break;
             }
+            case "sounds-dump":
+            {
+                // --test sounds-dump: every recording (data\sound-rec-*.raw, 10 s and longer) to data\dump-<name>.csv
+                using var fx = new Lights.SoundFx();
+                Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture; // dots in the CSV
+                foreach (var raw in Directory.GetFiles(Paths.Data, "sound-rec-*.raw").Where(f => new FileInfo(f).Length >= 16000 * 4 * 10))
+                {
+                    string name = Path.GetFileNameWithoutExtension(raw)["sound-rec-".Length..];
+                    using var w = new StreamWriter(Path.Combine(Paths.Data, $"dump-{name}.csv"));
+                    var t0 = DateTime.Now;
+                    fx.Dump(raw, w);
+                    o.AppendLine($"{name}: {(DateTime.Now - t0).TotalSeconds:F0} s");
+                }
+                break;
+            }
             case "running":
                 foreach (var g in GameScanner.RunningApps()) o.AppendLine($"{g.Name} | {g.InstallDir}");
                 break;
