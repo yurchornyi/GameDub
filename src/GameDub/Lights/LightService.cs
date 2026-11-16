@@ -24,12 +24,12 @@ public sealed class LightService : IDisposable
     // Colors as the stick LEDs show them: their green is far brighter than their red, so warm colors carry little
     // green (a light orange #FFB068 showed as green on the ROG Xbox Ally X, 16.11).
     static readonly Rgb Red = Rgb.Hex(0xFF0800), Orange = Rgb.Hex(0xFF2A00), Yellow = Rgb.Hex(0xFF6A00),
-        Green = Rgb.Hex(0x10FF30), Blue = Rgb.Hex(0x0020FF), Lightning = Rgb.Hex(0x9080FF);
+        Green = Rgb.Hex(0x10FF30), Blue = Rgb.Hex(0x0020FF), Lightning = Rgb.Hex(0xCC66FF); // cold white on these LEDs
 
     // Every effect rises softly, holds, then fades on a curve that looks even to the eye, 30 frames a second.
-    const int FrameMs = 33, SirenMs = 2400, SirenPeriod = 1200, HeartPeriod = 1000, HeartDub = 250;
+    const int FrameMs = 33, SirenMs = 2400, SirenPeriod = 1200, HeartPeriod = 1000, HeartDub = 250, ThunderMs = 700;
     static readonly Pulse ImpactPulse = new(120, 600, 900), HornPulse = new(100, 350, 700), ChargePulse = new(150, 600, 900),
-        SirenEnvelope = new(150, SirenMs - 550, 400), ThunderPulse = new(40, 150, 900), HeartBeat = new(60, 60, 220);
+        SirenEnvelope = new(150, SirenMs - 550, 400), HeartBeat = new(60, 60, 220);
 
     /// <summary>Brightness 0..1 of a one-shot effect over time: smooth rise, hold, then a squared fall
     /// (LED light looks linear to the eye only on a curve; a straight fall seems to hang, then drop).</summary>
@@ -112,7 +112,7 @@ public sealed class LightService : IDisposable
                 return;
             }
             _fx = kind; _fxStrength = strength; _fxStart = now;
-            _fxMs = kind switch { SoundKind.Impact => ImpactPulse.Total, SoundKind.Siren => SirenMs, SoundKind.Thunder => ThunderPulse.Total, _ => HornPulse.Total };
+            _fxMs = kind switch { SoundKind.Impact => ImpactPulse.Total, SoundKind.Siren => SirenMs, SoundKind.Thunder => ThunderMs, _ => HornPulse.Total };
         }
     }
 
@@ -230,7 +230,7 @@ public sealed class LightService : IDisposable
                     double w = 0.5 - 0.5 * Math.Cos(2 * Math.PI * age / SirenPeriod), env = k * SirenEnvelope.At(age);
                     return (Rgb.Mix(idle, Red, env * w * w), Rgb.Mix(idle, Blue, env * (1 - w) * (1 - w)));
                 case SoundKind.Thunder:
-                    var z = Rgb.Mix(idle, Lightning.Scale(k), ThunderPulse.At(age));
+                    var z = Rgb.Mix(idle, Lightning.Scale(Math.Max(k, 0.8)), Strike(age));
                     return (z, z);
                 default:
                     var h = Rgb.Mix(idle, Yellow.Scale(k), HornPulse.At(age));
@@ -257,6 +257,17 @@ public sealed class LightService : IDisposable
         // 6. idle glow; nothing on a dark screen
         return dark ? (Rgb.Off, Rgb.Off) : (idle, idle);
     }
+
+    /// <summary>Lightning: two sharp strokes, then a quick fade (a soft rise and a long fall looked like a glow, not
+    /// lightning, 16.11).</summary>
+    static double Strike(long age) => age switch
+    {
+        < 70 => 1,
+        < 160 => 0.05,
+        < 280 => 1,
+        < ThunderMs => Math.Pow(1 - (age - 280) / (double)(ThunderMs - 280), 2),
+        _ => 0
+    };
 
     /// <summary>Slow breathing 0..1, squared so it swells and ebbs evenly to the eye.</summary>
     static double Breath(double t, double period) { double b = 0.5 - 0.5 * Math.Cos(2 * Math.PI * t / period); return b * b; }
