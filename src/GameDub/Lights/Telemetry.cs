@@ -27,7 +27,7 @@ public sealed class Telemetry : IDisposable
     // for the log: a minute of racing
     double _maxJolt; int _crashes; long _statTick;
 
-    /// <summary>A crash, strength 0.5..1.</summary>
+    /// <summary>A crash, how hard 0..1: 0 just over the threshold, 1 from about 8.7 g.</summary>
     public event Action<double>? Crash;
 
     public Telemetry()
@@ -81,7 +81,7 @@ public sealed class Telemetry : IDisposable
         {
             _crashTick = now; _crashes++;
             Log.Write($"telemetry: crash {jolt / 9.81:F1} g");
-            try { Crash?.Invoke(Math.Clamp(0.5 + (jolt - CrashAccel) / 40, 0.5, 1)); } catch (Exception ex) { Log.Error("telemetry crash", ex); }
+            try { Crash?.Invoke(Math.Clamp((jolt - CrashAccel) / 50, 0, 1)); } catch (Exception ex) { Log.Error("telemetry crash", ex); }
         }
         if (now - _statTick > 60_000)
         {

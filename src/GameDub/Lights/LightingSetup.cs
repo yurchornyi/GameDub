@@ -41,6 +41,22 @@ static class LightingSetup
         catch (Exception ex) { Log.Error("lights hand over", ex); }
     }
 
+    /// <summary>
+    /// Windows' «Compatible apps in the foreground always control lighting» (Dynamic Lighting settings): on, a game with
+    /// its own lighting takes the sticks while it is in front; off, GameDub keeps them. Written only when it changes.
+    /// </summary>
+    public static void GamesTakeOver(bool on)
+    {
+        try
+        {
+            using var root = Registry.CurrentUser.CreateSubKey(Root, true);
+            if (root.GetValue("ControlledByForegroundApp") is int v && v == (on ? 1 : 0)) return;
+            root.SetValue("ControlledByForegroundApp", on ? 1 : 0, RegistryValueKind.DWord);
+            Log.Write($"lights: games with their own lighting {(on ? "take the sticks" : "leave them to GameDub")}");
+        }
+        catch (Exception ex) { Log.Error("lights foreground control", ex); }
+    }
+
     /// <summary>GameDub to the top of a background-control list, or to its end. Untouched when GameDub is not on it.</summary>
     static void Reorder(RegistryKey parent, string me, bool first)
     {

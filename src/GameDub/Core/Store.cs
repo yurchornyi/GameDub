@@ -86,6 +86,9 @@ public sealed class AppSettings
     public bool LightsRacing { get; set; } = true;     // brake lights (left trigger while an engine is heard) and Forza's telemetry
     public int LightsBase { get; set; } = 0;           // idle glow brightness, %; 0 = dark until an event (owner, 16.11)
     // Games that drive the lights themselves: GameDub stays off while one is in front (exe names without .exe).
+    // GameDub lights the sticks in games with their own lighting too: the skip list is ignored and Windows' «Compatible
+    // apps in the foreground always control lighting» is turned off (owner, 16.11: «може, я хочу, щоб … використовувалось моє»)
+    public bool LightsOverGames { get; set; } = false;
     public List<string> LightsSkipGames { get; set; } = new() { "eurotrucks2", "amtrucks" };
 
     public void NormalizeApiKeys()

@@ -38,7 +38,7 @@ public sealed class SoundFx : IDisposable
     // "Thunderstorm" is rain as well, heard for minutes: only the clap counts
     static readonly string[] ThunderNames = { "Thunder" };
 
-    /// <summary>Kind and strength 0..1 of a detected effect.</summary>
+    /// <summary>Kind and strength of a detected effect: 0 just over its threshold, 1 as sure as the model gets.</summary>
     public event Action<SoundKind, double>? Effect;
 
     readonly InferenceSession _model;
@@ -54,7 +54,8 @@ public sealed class SoundFx : IDisposable
     int _busy;
     // loudness over 20 ms blocks: silence skips the model
     double _block; int _blockN;
-    long _lastEffectTick, _lastSirenTick, _lastHornTick, _lastHeartTick, _lastThunderTick;
+    long _lastEffectTick, _lastThunderTick;
+    readonly long[] _lastHeard = new long[Enum.GetValues<SoundKind>().Length];
     // what was heard, for the log: strongest effect scores and the loudest top class over a minute
     double _sumImpact, _sumSiren, _sumHorn, _sumHeart, _sumThunder; string _top = ""; double _topScore; int _hops; long _statTick;
     string[] _names = Array.Empty<string>();
@@ -62,7 +63,8 @@ public sealed class SoundFx : IDisposable
 
     long _engineTick;
     /// <summary>An engine was heard within the last 3 s: a racing game is on.</summary>
-    public bool EngineHeard => Environment.TickCount64 - Interlocked.Read(ref _engineTick) < 3000;
+    public bool EngineHeard => EngineHeardWithin(3000);
+    public bool EngineHeardWithin(int ms) => Environment.TickCount64 - Interlocked.Read(ref _engineTick) < ms;
 
     /// <summary>No listening while nobody sees the lights (screen off, the console on a TV): no work for the model.</summary>
     public volatile bool Paused;
@@ -174,11 +176,12 @@ public sealed class SoundFx : IDisposable
             long now = Environment.TickCount64;
             if (Max(_engine) > 0.3) Interlocked.Exchange(ref _engineTick, now);
             Stats(scores, frames, impact, siren, horn, heart, thunder, now);
-            if (impact > 0.35) Fire(SoundKind.Impact, Math.Min(1, impact), now);
-            if (siren > 0.4) Fire(SoundKind.Siren, siren, now); // every look while it wails; the light runs on meanwhile
-            if (horn > 0.4 && now - _lastHornTick > 1000) { _lastHornTick = now; Fire(SoundKind.Horn, horn, now); }
-            if (heart > 0.3) Fire(SoundKind.Heartbeat, heart, now); // every look while it beats; the light keeps its own rhythm
-            if (thunder > 0.35 && now - _lastThunderTick > 4000) { _lastThunderTick = now; Fire(SoundKind.Thunder, thunder, now); }
+            if (impact > 0.35) Fire(SoundKind.Impact, impact, 0.35, now);
+            // a siren, a horn and a heartbeat fire every look while they last: their lights follow the sound
+            if (siren > 0.4) Fire(SoundKind.Siren, siren, 0.4, now);
+            if (horn > 0.4) Fire(SoundKind.Horn, horn, 0.4, now);
+            if (heart > 0.3) Fire(SoundKind.Heartbeat, heart, 0.3, now);
+            if (thunder > 0.35 && now - _lastThunderTick > 4000) { _lastThunderTick = now; Fire(SoundKind.Thunder, thunder, 0.35, now); }
         }
         catch (Exception ex) { Log.Error("soundfx classify", ex); }
         finally { Interlocked.Exchange(ref _busy, 0); }
@@ -199,18 +202,21 @@ public sealed class SoundFx : IDisposable
         _statTick = now; _hops = 0; _sumImpact = _sumSiren = _sumHorn = _sumHeart = _sumThunder = _topScore = 0; _top = "";
     }
 
-    void Fire(SoundKind kind, double strength, long now)
+    /// <summary>The strength is how far the score is over its threshold, 0..1: a faint sound gives a short dim light,
+    /// a loud one a long bright one. The log keeps the model's own score, for tuning.</summary>
+    void Fire(SoundKind kind, double score, double threshold, long now)
     {
         if (kind == SoundKind.Impact)
         {
             if (now - _lastEffectTick < 700) return; // one flash per burst of gunfire, not a strobe
             _lastEffectTick = now;
         }
-        // a heartbeat or a siren comes every look while it lasts: log only its start
-        ref long last = ref (kind == SoundKind.Siren ? ref _lastSirenTick : ref _lastHeartTick);
-        bool ongoing = kind is SoundKind.Heartbeat or SoundKind.Siren;
-        if (!ongoing || now - last > 2000) Log.Write($"soundfx: {kind} {strength:F2}");
-        if (ongoing) last = now;
+        // a siren, a horn or a heartbeat comes every look while it lasts: log only its start
+        bool ongoing = kind is SoundKind.Heartbeat or SoundKind.Siren or SoundKind.Horn;
+        ref long last = ref _lastHeard[(int)kind];
+        if (!ongoing || now - last > 2000) Log.Write($"soundfx: {kind} {score:F2}");
+        last = now;
+        double strength = Math.Clamp((score - threshold) / (1 - threshold), 0, 1);
         try { Effect?.Invoke(kind, strength); } catch (Exception ex) { Log.Error("soundfx effect", ex); }
     }
 

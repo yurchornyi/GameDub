@@ -135,12 +135,14 @@ public sealed class TrayApp : ApplicationContext
             if (_s.LightsOn)
             {
                 if (handOver) Lights.LightingSetup.Hand(true);   // before the lamps are opened
+                Lights.LightingSetup.GamesTakeOver(!_s.LightsOverGames);
                 _lights ??= new Lights.LightService(); _lights.Apply(_s);
             }
             else
             {
                 if (_lights != null) { _lights.Dispose(); _lights = null; }
                 if (handOver) Lights.LightingSetup.Hand(false);  // Armoury's own colors back
+                if (_lightsWere != null) Lights.LightingSetup.GamesTakeOver(true); // Windows' default back
             }
             _lightsWere = _s.LightsOn;
         }
