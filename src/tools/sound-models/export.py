@@ -92,6 +92,7 @@ def real_clip(rate):
 
 
 def export_eat(name, out, src, report):
+    src = os.path.abspath(src)
     cwd = os.getcwd()
     sys.path.insert(0, src)
     os.chdir(src)  # helpers.utils reads metadata/ from the working folder

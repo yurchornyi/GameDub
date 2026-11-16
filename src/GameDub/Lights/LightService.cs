@@ -94,7 +94,7 @@ public sealed class LightService : IDisposable
         Log.Write("lights: service started");
     }
 
-    public string Describe() => _lights.Describe() + (_sound != null ? "; sound effects on" : SoundFx.ModelPresent ? "" : "; no yamnet model");
+    public string Describe() => _lights.Describe() + (_sound != null ? "; sound effects on" : SoundFx.ModelPresent ? "" : "; no sound model");
 
     public void Apply(AppSettings s)
     {

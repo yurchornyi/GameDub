@@ -85,6 +85,20 @@ public static class Program
                 Thread.Sleep(secs * 1000);
                 break;
             }
+            case "soundfx-files":
+            {
+                // --test soundfx-files <file>...: play sound files into the effects in real time, no speakers
+                using var fx = new Lights.SoundFx();
+                string cur = ""; var t0 = DateTime.Now;
+                fx.Effect += (k, st) => { lock (o) o.AppendLine($"{cur}\t{(DateTime.Now - t0).TotalSeconds:F2}\t{k}\t{st:F2}"); };
+                foreach (var f in a.Skip(1))
+                {
+                    lock (o) { cur = Path.GetFileName(f); t0 = DateTime.Now; }
+                    fx.PlayFile(f);
+                    Thread.Sleep(1200);
+                }
+                break;
+            }
             case "running":
                 foreach (var g in GameScanner.RunningApps()) o.AppendLine($"{g.Name} | {g.InstallDir}");
                 break;
