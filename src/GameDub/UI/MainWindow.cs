@@ -321,7 +321,7 @@ public sealed class MainWindow : Window
             v => _s.LightsSkipGames = v.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(x => x.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? x[..^4] : x).Distinct(StringComparer.OrdinalIgnoreCase).ToList()));
         if (!Lights.SoundFx.ModelPresent)
-            list.Children.Add(Info("Моделі звуків", "немає: src\\tools\\get-models.ps1"));
+            list.Children.Add(Info("Модель звуків (yamnet)", "немає: src\\tools\\get-models.ps1"));
 
         list.Children.Add(Section("Платні сервіси (необов'язково)"));
         list.Children.Add(Choice("Голоси", () => _s.TtsEngine, v => _s.TtsEngine = v,

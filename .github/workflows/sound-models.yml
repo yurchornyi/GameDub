@@ -1,7 +1,7 @@
 name: sound-models
 
-# Exports the stick lighting's sound models (EfficientAT, CLAP) to ONNX, checks them against the originals and
-# compares them with YAMNet on public sounds. Runs when the scripts change, or by hand.
+# Exports EfficientAT (the stick lighting's blast check) to ONNX and checks it against PyTorch and on a real sound.
+# Runs when the script changes, or by hand; its artifact is what the efficientat-1 release holds.
 on:
   pull_request:
     paths:
@@ -13,10 +13,10 @@ permissions:
   contents: read
 
 jobs:
-  models:
+  export:
     # Public repository: GitHub-hosted runner only.
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,43 +28,11 @@ jobs:
           pip install -r src/tools/sound-models/requirements.txt
       - name: Export
         run: python src/tools/sound-models/export.py --out work/models --work work/src
-      - name: YAMNet (the model the app uses today)
-        run: |
-          mkdir -p work/yamnet
-          curl -sfL https://huggingface.co/zeropointnine/yamnet-onnx/resolve/main/yamnet.onnx -o work/yamnet/yamnet.onnx
-          curl -sfL https://huggingface.co/zeropointnine/yamnet-onnx/resolve/main/yamnet_class_map.csv -o work/yamnet/yamnet_class_map.csv
-      # the sounds take long to download (the servers limit requests): each run keeps what it has, and the next one
-      # goes on from the newest
-      - uses: actions/cache/restore@v4
-        with:
-          path: work/data
-          key: sound-eval-data-v2-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: sound-eval-data-v2-
-      - name: Evaluate
-        run: python src/tools/sound-models/evaluate.py --models work/models --yamnet work/yamnet --data work/data --report work/report.md --scores work/scores.json.gz
-      - uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: work/data
-          key: sound-eval-data-v2-${{ github.run_id }}-${{ github.run_attempt }}
-      - name: Report
-        if: always()
-        run: if [ -f work/report.md ]; then cat work/report.md >> "$GITHUB_STEP_SUMMARY"; fi
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: sound-models
+          name: efficientat
           path: |
-            work/models/*.onnx
-            work/models/*.csv
+            work/models/efficientat.onnx
+            work/models/efficientat_class_map.csv
             work/models/export.json
-          retention-days: 14
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: sound-eval
-          path: |
-            work/report.md
-            work/scores.json.gz
-            work/test-clips/
           retention-days: 14
