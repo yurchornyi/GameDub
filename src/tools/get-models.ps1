@@ -1,4 +1,4 @@
-# Downloads the offline models into C:\GameDub\models (~740 MB). Both are optional:
+# Downloads the offline models into C:\GameDub\models (~760 MB). Both are optional:
 # without them GameDub uses online translation and the free Edge voices.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -34,5 +34,15 @@ Get-Files 'Xenova/opus-mt-ru-uk' "$root\opus-mt-ru-uk" @(
 
 Write-Host 'YAMNet - sound effects for the joystick lighting (Google, Apache-2.0), ~16 MB'
 Get-Files 'zeropointnine/yamnet-onnx' "$root\yamnet" @('yamnet.onnx', 'yamnet_class_map.csv')
+
+Write-Host 'EfficientAT mn10_as - checks the blasts YAMNet hears (JKU Linz, MIT), ~19 MB'
+# exported to ONNX by src\tools\sound-models\export.py (the sound-models workflow), kept in a GameDub release
+New-Item -ItemType Directory -Force "$root\efficientat" | Out-Null
+foreach ($f in 'efficientat.onnx', 'efficientat_class_map.csv') {
+    $out = "$root\efficientat\$f"
+    if (Test-Path $out) { continue }
+    Write-Host "  $f"
+    Invoke-WebRequest "https://github.com/yurchornyi/GameDub/releases/download/efficientat-1/$f" -OutFile $out -UseBasicParsing
+}
 
 Write-Host 'Done.'

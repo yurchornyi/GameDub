@@ -1,0 +1,38 @@
+name: sound-models
+
+# Exports EfficientAT (the stick lighting's blast check) to ONNX and checks it against PyTorch and on a real sound.
+# Runs when the script changes, or by hand; its artifact is what the efficientat-1 release holds.
+on:
+  pull_request:
+    paths:
+      - 'src/tools/sound-models/**'
+      - '.github/workflows/sound-models.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    # Public repository: GitHub-hosted runner only.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1 torchaudio==2.5.1 torchvision==0.20.1
+          pip install -r src/tools/sound-models/requirements.txt
+      - name: Export
+        run: python src/tools/sound-models/export.py --out work/models --work work/src
+      - uses: actions/upload-artifact@v4
+        with:
+          name: efficientat
+          path: |
+            work/models/efficientat.onnx
+            work/models/efficientat_class_map.csv
+            work/models/export.json
+          retention-days: 14
