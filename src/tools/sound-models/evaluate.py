@@ -356,12 +356,12 @@ def init_worker(models_dir, yam_dir, clap_keys):
                 for k, ns in [("yamnet", yn), ("eat", en)]}
     y = sess(os.path.join(yam_dir, "yamnet.onnx"))
     M["yamnet"] = (y, y.get_inputs()[0].name, [o.name for o in y.get_outputs() if o.shape and o.shape[-1] == 521][0])
-    M["eat_models"] = []
-    for m in ("mn10",):
-        p = os.path.join(models_dir, f"efficientat-{m}_as.onnx")
-        if os.path.exists(p):
-            M[m] = sess(p)
-            M["eat_models"].append(m)
+    # EfficientAT hears only 10 s clips (training padded short ones with silence): a one-second cut alone scores
+    # every class near 1.0, so the cut is padded with silence after it, to 5 s or to 10 s (tried both)
+    e = sess(os.path.join(models_dir, "efficientat-mn10_as.onnx"))
+    M["eat_models"] = list(EAT_PAD)
+    for m in EAT_PAD:
+        M[m] = e
     # the int8 files, the ones the app would take (worst cosine to float 0.997)
     M["clap"] = {k: sess(os.path.join(models_dir, f"{k}.int8.onnx")) for k in clap_keys}
     prompts = list(csv.DictReader(open(os.path.join(models_dir, "clap_prompts.csv"))))
@@ -384,8 +384,12 @@ def yamnet(c16):
     return v.max(0) if v.ndim == 2 else v
 
 
+EAT_PAD = {"mn10_p5": 5, "mn10_p10": 10}
+
+
 def eat(key, c32):
-    return timed(key, lambda: M[key].run(None, {"wave": c32[None]})[0][0])
+    w = np.concatenate([c32, np.zeros(EAT_PAD[key] * 32000 - len(c32), np.float32)])
+    return timed(key, lambda: M[key].run(None, {"wave": w[None]})[0][0])
 
 
 def summary(model, v):
@@ -446,13 +450,13 @@ def run_clip(job):
             if pipe == "yamnet":
                 judged.append({"t": t, "at": at, "rms": r, "yamnet": summary("yamnet", yamnet(c))})
             else:
-                j = {"t": t, "at": at, "rms": r, "mn10_w500": summary("mn10", eat("mn10", c[-16000:]))}
+                j = {"t": t, "at": at, "rms": r}
                 for m in M["eat_models"]:
                     j[m] = summary(m, eat(m, c))
                 judged.append(j)
         if pipe == "eat" and do_clap and M["clap"]:
             # CLAP for the three most hit-like onsets: 1 s ending 250 ms after the onset, as the app cuts it
-            for j in sorted(judged, key=lambda j: -j["mn10"]["hint"])[:3]:
+            for j in sorted(judged, key=lambda j: -max(j[m]["hint"] for m in M["eat_models"]))[:3]:
                 c = cut(xs, j["at"] + rate * 250 // 1000, rate)
                 if c is not None:
                     j["clap"] = {f"{k}@250/1.0": clap(k, to48(c)) for k in M["clap"]}
@@ -585,7 +589,8 @@ def report(recs, export, out):
 
     # 1. today's YAMNet against EfficientAT at the same thresholds
     have = {k for r in recs[:50] for j in r["pipes"]["eat"]["onsets"] for k in j}
-    pipes = [p for p in [("yamnet", "yamnet", None), ("mn10", "mn10", None), ("mn10, 0.5 s cut", "mn10", "mn10_w500")] if p[1] == "yamnet" or p[1] in have]
+    pipes = [p for p in [("yamnet", "yamnet", None), ("mn10, 5 s", "mn10_p5", None), ("mn10, 10 s", "mn10_p10", None)]
+             if p[1] == "yamnet" or p[1] in have]
     for what in ("shot", "blast", "siren", "horn"):
         L += [f"## {what}: same thresholds as today", "", "| group | " + " | ".join(p[0] for p in pipes) + " |",
               "|---|" + "---|" * len(pipes)]
@@ -595,8 +600,9 @@ def report(recs, export, out):
         L.append("")
 
     # 2. threshold sweeps
-    sweeps = {"shot": ("gun", [0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6]), "blast": ("impact", [0.2, 0.3, 0.35, 0.4, 0.5, 0.6]),
-              "siren": ("siren", [0.2, 0.3, 0.4, 0.5, 0.6]), "horn": ("horn", [0.2, 0.3, 0.4, 0.5, 0.6])}
+    sweeps = {"shot": ("gun", [0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6]),
+              "blast": ("impact", [0.05, 0.1, 0.2, 0.3, 0.35, 0.4, 0.5, 0.6]),
+              "siren": ("siren", [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]), "horn": ("horn", [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])}
     for what, (key, vals) in sweeps.items():
         L += [f"## {what}: thresholds", "", "| model | threshold | caught | false | worst false groups |", "|---|---|---|---|---|"]
         for name, m, j in pipes:
@@ -612,7 +618,7 @@ def report(recs, export, out):
     L += ["## engine heard (a look over the threshold)", "", "| model | threshold | vehicle groups | other groups |", "|---|---|---|---|"]
     veh = {"as: vehicle", "as: skidding", "as: car crash", "esc: engine", "sfx: Vehicle Sounds", "sfx: car collision"}
     for m in [p[1] for p in pipes if p[2] is None]:
-        for v in (0.2, 0.3, 0.4, 0.5):
+        for v in (0.1, 0.2, 0.3, 0.4, 0.5):
             hv = nv = ho = no = 0
             for r in recs:
                 p = r["pipes"]["yamnet" if m == "yamnet" else "eat"]
@@ -629,18 +635,21 @@ def report(recs, export, out):
     # 3. crashes with CLAP
     keys = sorted({k for r in recs for j in r["pipes"]["eat"]["onsets"] for k in j.get("clap", {})})
     crecs = [r for r in recs if any("clap" in j for j in r["pipes"]["eat"]["onsets"])]
-    L += ["## crash (CLAP), after EfficientAT mn10 found no shot and no blast", "",
+    L += ["## crash (CLAP), after EfficientAT found no shot and no blast", "",
           "Clips scored by CLAP: " + str(len(crecs)) + ". Gate: an engine heard within 8 s (as in the app) or not.", "",
-          "| CLAP | engine gate | hint | crash | caught | false | worst false groups | CLAP runs |", "|---|---|---|---|---|---|---|---|"]
-    for k in keys:
-        for gate in (True, False):
-            for hint in (0.0, 0.05, 0.1):
-                for cth in (0.3, 0.4, 0.5, 0.6, 0.7, 0.8):
-                    c = dict(BASE, crash=cth, hint=hint, clap=k, gate_engine=gate)
-                    rr = rate(crecs, "mn10", c, "crash")
-                    runs = sum(simulate(r, "mn10", c)["clap_runs"] for r in crecs)
-                    f, worst = false_share(rr, "crash")
-                    L.append(f"| {k} | {'yes' if gate else 'no'} | {hint} | {cth} | {hit_share(rr, 'crash')} | {f} | {worst} | {runs} |")
+          "| EfficientAT | CLAP | engine gate | hint | crash | caught | false | worst false groups | CLAP runs |",
+          "|---|---|---|---|---|---|---|---|---|"]
+    for m in [p[1] for p in pipes if p[1] != "yamnet"]:
+        for k in keys:
+            for gate in (True, False):
+                for hint in (0.0, 0.05):
+                    for cth in (0.3, 0.4, 0.5, 0.6, 0.7, 0.8):
+                        c = dict(BASE, crash=cth, hint=hint, clap=k, gate_engine=gate)
+                        rr = rate(crecs, m, c, "crash")
+                        runs = sum(simulate(r, m, c)["clap_runs"] for r in crecs)
+                        f, worst = false_share(rr, "crash")
+                        L.append(f"| {m} | {k} | {'yes' if gate else 'no'} | {hint} | {cth} | {hit_share(rr, 'crash')} | {f} | "
+                                 f"{worst} | {runs} |")
     L.append("")
     L += ["## Speed on this runner (ms per run, one thread)", ""]
     for k, (n, t) in sorted(ms.items()):
@@ -653,8 +662,8 @@ DOG = {"Dog", "Bark", "Bow-wow", "Yip", "Growling", "Howl", "Whimper (dog)", "An
 
 def self_check(models_dir, yam_dir, esc):
     """Before three thousand clips: each model must name a real sound, a dog barking from ESC-50, in its loudest
-    second, fed exactly as the clips are. (16.11.2026 a run scored 1.0 for every class of every clip with EfficientAT,
-    while its export matched PyTorch on noise.)"""
+    second, fed exactly as the clips are. (16.11.2026 a run scored 1.0 for every class of every clip with EfficientAT
+    fed one second alone, while its export matched PyTorch.)"""
     init_worker(models_dir, yam_dir, [])
     path = next(p for p, g in esc if g == "esc: dog")
     x, sr = sf.read(path, dtype="float32", always_2d=True)
@@ -666,18 +675,14 @@ def self_check(models_dir, yam_dir, esc):
     c32, c16 = x32[e - 32000:e], x16[e // 2 - 15600:e // 2]
     top = lambda v, ns: ", ".join(f"{ns[i]} {v[i]:.2f}" for i in np.argsort(-v)[:5])
     en = M["names"]["eat"]
-    v = eat("mn10", c32)
-    so = ort.SessionOptions()  # the export's own way: default options
-    v_default = ort.InferenceSession(os.path.join(models_dir, "efficientat-mn10_as.onnx"), so,
-                                     providers=["CPUExecutionProvider"]).run(None, {"wave": c32[None].copy()})[0][0]
-    noise = (np.random.default_rng(0).standard_normal(32000) * 0.1).astype(np.float32)
+    v = eat("mn10_p10", c32)
+    v5 = eat("mn10_p5", c32)
     print(f"self-check: {os.path.basename(path)}, {sr} Hz, cut {c32.dtype} {c32.shape} rms {float(np.sqrt((c32 ** 2).mean())):.3f} "
           f"peak {float(np.abs(c32).max()):.3f}")
     print(f"  yamnet: {top(yamnet(c16), M['names']['yamnet'])}")
-    print(f"  mn10: {top(v, en)}; mean {float(v.mean()):.3f}; output shape {M['mn10'].get_outputs()[0].shape}")
-    print(f"  mn10, default session: {top(v_default, en)}")
-    print(f"  mn10, noise: {top(eat('mn10', noise), en)}")
-    if en[int(np.argmax(v))] not in DOG:
+    print(f"  mn10, padded to 10 s: {top(v, en)}; mean {float(v.mean()):.3f}")
+    print(f"  mn10, padded to 5 s: {top(v5, en)}; mean {float(v5.mean()):.3f}")
+    if en[int(np.argmax(v))] not in DOG and en[int(np.argmax(v5))] not in DOG:
         raise SystemExit("self-check: EfficientAT does not hear the dog, the scores would mean nothing")
 
 

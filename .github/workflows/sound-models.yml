@@ -28,10 +28,6 @@ jobs:
           pip install -r src/tools/sound-models/requirements.txt
       - name: Export
         run: python src/tools/sound-models/export.py --out work/models --work work/src
-      - name: EfficientAT on one-second cuts padded with silence
-        if: always()
-        working-directory: work/src/EfficientAT
-        run: pip install -q librosa==0.10.2.post1 && python ../../../src/tools/sound-models/eat_check.py
       - name: YAMNet (the model the app uses today)
         run: |
           mkdir -p work/yamnet

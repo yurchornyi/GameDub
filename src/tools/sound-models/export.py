@@ -158,30 +158,23 @@ def export_eat(name, out, src, report):
     print(f"{name}:   EfficientAT's own way: {top(p_own)}")
     print(f"{name}:   pytorch wrapper: {top(p_torch)}")
     print(f"{name}:   onnx: {top(p_onnx)}; mean {float(p_onnx.mean()):.3f}")
-    # how short a cut the model still hears: the app judges one second ending at the sound (16.11.2026 every one-second
-    # cut scored 1.0 on all classes in the eval, while the whole five-second clip is named right)
+    # the model hears only 10 s clips: one second alone scores every class near 1.0 (16.11.2026, PyTorch 1.13 alike),
+    # so the app pads its one-second cut with silence; check that too
     n = len(dog) // 320
     loud = int(np.argmax(np.sqrt((dog[:n * 320].reshape(n, 320) ** 2).mean(1))))
-    end = min(len(dog), max(32000, (loud + 30) * 320))
-    noise = (np.random.default_rng(0).standard_normal(96000) * 0.1).astype(np.float32)
-    one = dog[end - 32000:end]
-    cuts = [(f"dog, last {k / 32000:g} s", dog[max(0, end - k):end]) for k in (16000, 32000, 48000, 64000, 96000)]
-    cuts += [("dog, 1 s after 2 s of silence", np.concatenate([np.zeros(64000, np.float32), one])),
-             ("dog, 1 s three times", np.tile(one, 3)),
-             ("noise 1 s", noise[:32000]), ("noise 3 s", noise)]
-    lengths = {}
-    for what, c in cuts:
-        with torch.no_grad():
-            pt = model(torch.from_numpy(np.ascontiguousarray(c))[None]).numpy()[0]
-        po = sess.run(None, {"wave": np.ascontiguousarray(c)[None]})[0][0]
-        print(f"{name}: {what}: pytorch {top(pt)} (mean {float(pt.mean()):.3f}); onnx {top(po)} (mean {float(po.mean()):.3f})")
-        lengths[what] = top(po)
-    heard = labels[int(np.argmax(p_onnx))] in DOG
+    end = min(len(dog), max(32000, (loud + 6) * 320))
+    padded = {}
+    for secs in (5, 10):
+        w = np.concatenate([dog[end - 32000:end], np.zeros(32000 * (secs - 1), np.float32)])
+        po = sess.run(None, {"wave": w[None]})[0][0]
+        padded[secs] = labels[int(np.argmax(po))] in DOG
+        print(f"{name}: one second of the dog, padded to {secs} s: {top(po)}")
+    heard = labels[int(np.argmax(p_onnx))] in DOG and any(padded.values())
     ok = worst < 1e-3 and heard
     print(f"{name}: onnx vs pytorch, worst difference {worst:.2e}; hears the dog: {heard}; {'OK' if ok else 'FAIL'}")
     report[f"efficientat-{name}"] = {
         "file": os.path.basename(path), "mb": round(os.path.getsize(path) / 2**20, 1), "worst_diff": worst, "ok": ok,
-        "dog": top(p_onnx), "dog_cuts": lengths,
+        "dog": top(p_onnx),
         "ms_1s_1thread": bench(path, {"wave": np.zeros((1, 32000), np.float32) + 0.01}, 1),
         "ms_1s_2threads": bench(path, {"wave": np.zeros((1, 32000), np.float32) + 0.01}, 2),
     }
