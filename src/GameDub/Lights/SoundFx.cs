@@ -42,7 +42,8 @@ public enum SoundKind { Impact, Siren, Horn, Shot }
 /// footsteps 45 % to 0, clapping 35 % to 0, crackling fire 40 % to 5, doors and knocks 12 % to 2. EfficientAT hears only
 /// 10 s clips (trained on them, short ones padded with silence): one second alone scores every class near 1.0, so
 /// its second is padded with 9 s of silence. It does not replace YAMNet: alone it caught fewer shots and horns, and
-/// at 10 s it costs 30 times YAMNet's time; checking blasts only, it runs a few times a minute.
+/// at 10 s it costs 30 times YAMNet's time; checking blasts only, it runs a few times a minute. On the console
+/// (17.11): a check ~80 ms against YAMNet's ~8 ms, ~25 MB more for the service (95 MB private), ~9 MB more for a moment.
 /// </summary>
 public sealed class SoundFx : IDisposable
 {
