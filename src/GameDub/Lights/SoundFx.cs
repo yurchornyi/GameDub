@@ -84,7 +84,7 @@ public sealed class SoundFx : IDisposable
     // the crash check (CLAP): on the second that ends 250 ms after the onset, while an engine was heard within 8 s
     const int CrashPostSamples = Rate * 250 / 1000, CrashStaleMs = 450, CrashEngineMs = 8000;
     const int ClapRate = 48000, ClapSamples = ClapRate * 10;
-    const double HintScore = 0.05, CrashJump = 2.5, CrashScore = 0.6, RaceCrashScore = 0.35, CrashLogScore = 0.1;
+    const double HintScore = 0.05, CrashJump = 2.5, CrashScore = 0.6, RaceCrashScore = 0.4, CrashLogScore = 0.1;
     const int CrashEveryMs = 1000;          // one CLAP check a second at most: ~0.3 s of two threads each, beside the game
     // what a crash may sound like to YAMNet: only these go on to CLAP
     static readonly string[] HintNames = { "Smash, crash", "Bang", "Thump, thud", "Slam", "Breaking", "Crushing", "Clang",
@@ -152,8 +152,9 @@ public sealed class SoundFx : IDisposable
     public volatile bool Paused;
 
     /// <summary>A racing game is in front (its Steam genre): there every sudden sound goes to CLAP, and a crash lights
-    /// at 0.35. Wreckfest, 18.11: under its engine YAMNet heard no hit at all (hint 0.01), the largest jump of a minute of
-    /// crashes was 2.5, and the one hit CLAP heard scored 0.37.</summary>
+    /// at 0.4. Wreckfest, 18.11: under its engine YAMNet heard no hit at all (hint 0.01) and the largest jump of a minute of
+    /// crashes was 2.5; with every sound sent, crashes scored 0.50-0.69 («a car hitting a wall») and the rest (music,
+    /// rain, revving) up to 0.34.</summary>
     public volatile bool Racing;
 
     public static string ModelDir => Path.Combine(Paths.Root, "models", "yamnet");
