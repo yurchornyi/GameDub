@@ -40,6 +40,7 @@ public sealed class LightService : IDisposable
     // a shot is the player's own when the right trigger was pulled within 0.6 s before it is shown (the game, the sound
     // and the model take 0.1-0.25 s); a burst goes on while its shots come less than 1 s apart (the model misses some)
     const int FireMs = 600, BurstGapMs = 1000;
+    const double MineLoudness = 0.4;   // with the aim held, the player's shot is at least this share of the loudest lately
     static readonly Pulse ChargePulse = new(150, 600, 900), ShiftBlink = new(20, 60, 80),
         ShotPulse = new(10, 30, 150); // one shot: a quick orange blink, so a burst reads as separate shots
     /// <summary>An impact by its strength 0..1: 0.4 s and dim for a touch, 1.6 s and bright for a heavy crash.</summary>
@@ -144,7 +145,7 @@ public sealed class LightService : IDisposable
             switch (kind)
             {
                 case SoundKind.Shot:
-                    if (!MyShot(now)) return;
+                    if (!MyShot(now, strength)) return;
                     _shotStart = now; _shotStrength = strength;
                     return;
                 case SoundKind.Siren:
@@ -169,20 +170,29 @@ public sealed class LightService : IDisposable
     /// the aim held (the left trigger) is only a fall of that axis, like letting the aim go: a shot right after a fall
     /// counts, and while the axis stays below the aim alone, the next shots count as long as they come less than 1 s apart
     /// (an automatic burst with both held). No pad to read (another kind of pad, or none has spoken yet): every shot, as
-    /// before. In a car the right trigger is the gas, so there all shots show. Under _gate.
+    /// before. In a car the right trigger is the gas, so there all shots show.
+    /// Letting the aim go looks like that fall too, and the police shots right after it flashed (GTA Online, 18.11: «коли я
+    /// постріляв, тоді блимає»), so after a fall a shot counts only when it is loud, at least 40 % of the loudest shot
+    /// lately (the player's own gun is the loudest; far shots were 0.02-0.1 of it). Under _gate.
     /// </summary>
-    bool MyShot(long now)
+    bool MyShot(long now, double strength)
     {
         var fire = _pad.RightTrigger(now, FireMs);
+        bool loud = strength >= MineLoudness;
         bool mine = fire switch
         {
-            PadInput.Fire.Unknown or PadInput.Fire.Pulled or PadInput.Fire.Fell => true,
-            PadInput.Fire.Held => now - _mineTick < BurstGapMs,
+            PadInput.Fire.Unknown or PadInput.Fire.Pulled => true,
+            PadInput.Fire.Fell => loud,
+            PadInput.Fire.Held => loud && now - _mineTick < BurstGapMs,
             _ => false,
         };
-        if (mine) { _mineTick = now; _shotsMine++; return true; }
+        if (mine)
+        {
+            if (now - _mineTick > 2000) Log.Write($"lights: the player's shot (trigger {fire}, Z {_pad.Z:F2}, strength {strength:F2})");
+            _mineTick = now; _shotsMine++; return true;
+        }
         _shotsDark++;
-        if (now - _darkLogTick > 2000) { _darkLogTick = now; Log.Write($"lights: a shot left dark, not the player's (trigger {fire}, Z {_pad.Z:F2})"); }
+        if (now - _darkLogTick > 2000) { _darkLogTick = now; Log.Write($"lights: a shot left dark, not the player's (trigger {fire}, Z {_pad.Z:F2}, strength {strength:F2})"); }
         return false;
     }
 
