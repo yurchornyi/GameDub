@@ -241,6 +241,7 @@ public sealed class LightService : IDisposable
             // heard lately, no telemetry) or a press is awaited
             string? front = ForegroundPath();
             _racingGame = s.LightsRacing && RacingGames.IsRacing(front);
+            if (_sound is { } fx) fx.Racing = _racingGame;   // in a race every sudden sound goes to the crash check
             bool race = _racingGame && _telemetry?.Live != true && _sound?.EngineHeardWithin(30_000) == true;
             bool shots = _sound != null && s.LightsSound && !_display.Off;   // the right trigger tells the player's own shots
             _pad.Listen(!_docked && (race || _downloaded || shots));
