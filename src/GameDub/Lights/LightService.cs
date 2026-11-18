@@ -20,6 +20,7 @@ namespace GameDub.Lights;
 /// The console on a TV (an external display active): lights and listening off, the sticks are out of sight.
 /// No rumble of its own: games rumble themselves, and a second one on top was a bother (owner, 16.11).
 /// Racing: brake lights and, with Forza's telemetry, a shift light and crashes. The sticks are as bright as the screen.
+/// Shots: only the player's own, told by the right trigger (<see cref="MyShot"/>); others' shots stay dark.
 /// Switched off in the settings, the tray disposes this, and Windows' own lighting effect comes back.
 /// </summary>
 public sealed class LightService : IDisposable
@@ -36,6 +37,9 @@ public sealed class LightService : IDisposable
     // slow breathing (states).
     const int FrameMs = 33, SirenPeriod = 800, ShiftPeriod = 500, ShiftGap = 180;
     const int HeardHold = 700; // a sound heard again within this keeps its light on: the model looks every 480 ms
+    // a shot is the player's own when the right trigger was pulled within 0.6 s before it is shown (the game, the sound
+    // and the model take 0.1-0.25 s); a burst goes on while its shots come less than 0.6 s apart
+    const int FireMs = 600, BurstGapMs = 600;
     static readonly Pulse ChargePulse = new(150, 600, 900), ShiftBlink = new(20, 60, 80),
         ShotPulse = new(10, 30, 150); // one shot: a quick orange blink, so a burst reads as separate shots
     /// <summary>An impact by its strength 0..1: 0.4 s and dim for a touch, 1.6 s and bright for a heavy crash.</summary>
@@ -71,6 +75,7 @@ public sealed class LightService : IDisposable
     // one-shot effect
     long _fxStart; int _fxMs; SoundKind? _fx; double _fxStrength;
     long _shotStart; double _shotStrength; // the last shot: its own short pulse, over an impact's longer one
+    long _mineTick, _darkLogTick; int _shotsMine, _shotsDark; // the player's last own shot; shots over a minute, for the log
     // a siren or a horn heard in the game: lit from its start until its until, moved on while it is heard
     long _sirenStart, _sirenUntil, _hornStart, _hornUntil; double _hornStrength;
     // states
@@ -139,6 +144,7 @@ public sealed class LightService : IDisposable
             switch (kind)
             {
                 case SoundKind.Shot:
+                    if (!MyShot(now)) return;
                     _shotStart = now; _shotStrength = strength;
                     return;
                 case SoundKind.Siren:
@@ -155,6 +161,29 @@ public sealed class LightService : IDisposable
             _fx = kind; _fxStrength = strength; _fxStart = now;
             _fxMs = ImpactPulse(strength).Total;
         }
+    }
+
+    /// <summary>
+    /// A shot is shown only when it is the player's own: the right trigger, fire in shooters, was pulled within 0.6 s
+    /// (others' shots, NPCs' and enemies', stay dark). The Xbox-style pad shows both triggers on one axis, so fire with
+    /// the aim held (the left trigger) is only a fall of that axis, like letting the aim go: a shot right after a fall
+    /// counts, and while the axis stays where it fell, the next shots count as long as they come less than 0.6 s apart
+    /// (an automatic burst with both held). No pad to read (another kind of pad, or none has spoken yet): every shot, as
+    /// before. In a car the right trigger is the gas, so there all shots show. Under _gate.
+    /// </summary>
+    bool MyShot(long now)
+    {
+        var fire = _pad.RightTrigger(now, FireMs);
+        bool mine = fire switch
+        {
+            PadInput.Fire.Unknown or PadInput.Fire.Pulled or PadInput.Fire.Fell => true,
+            PadInput.Fire.Held => now - _mineTick < BurstGapMs,
+            _ => false,
+        };
+        if (mine) { _mineTick = now; _shotsMine++; return true; }
+        _shotsDark++;
+        if (now - _darkLogTick > 2000) { _darkLogTick = now; Log.Write($"lights: a shot left dark, not the player's (trigger {fire})"); }
+        return false;
     }
 
     /// <summary>Every second: things that change slowly.</summary>
@@ -176,10 +205,16 @@ public sealed class LightService : IDisposable
             string? front = ForegroundPath();
             _racingGame = s.LightsRacing && RacingGames.IsRacing(front);
             bool race = _racingGame && _telemetry?.Live != true && _sound?.EngineHeardWithin(30_000) == true;
-            _pad.Listen(!_docked && (race || _downloaded));
+            bool shots = _sound != null && s.LightsSound && !_display.Off;   // the right trigger tells the player's own shots
+            _pad.Listen(!_docked && (race || _downloaded || shots));
             if (now - _brakeStatTick > 60_000)
             {
                 if (_brakeHeldFrames > 0) Log.Write($"race: a minute, brake held {_brakeHeldFrames * FrameMs / 1000.0:F1} s, lit {_brakeLitFrames * FrameMs / 1000.0:F1} s");
+                lock (_gate)
+                {
+                    if (_shotsMine + _shotsDark > 0) Log.Write($"lights: a minute, {_shotsMine} shots shown as the player's, {_shotsDark} others' left dark");
+                    _shotsMine = _shotsDark = 0;
+                }
                 _brakeStatTick = now; _brakeHeldFrames = _brakeLitFrames = 0;
             }
             if (now - _screenTick > 3000)

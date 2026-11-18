@@ -8,12 +8,15 @@ using GameDub.Core;
 namespace GameDub.Lights;
 
 /// <summary>
-/// The gamepad, read in the background: the left trigger (the brake) and any press. Windows gives XInput and
+/// The gamepad, read in the background: the left trigger (the brake), the right trigger (fire) and any press. Windows gives XInput and
 /// GameInput state only to the app in front; a background app reads zeros (16.11 test on the ROG Xbox Ally X: three
 /// minutes of racing, the left trigger 0 all the time). Raw Input with RIDEV_INPUTSINK still gets the pad's HID reports.
 /// The HID view of an Xbox-style pad (its device path has "IG_") has both triggers on one Z axis: the left one moves it
-/// up from the middle, the right one down; both at once cancel out (a known limit of that view).
-/// It listens only while asked (a race on, or waiting for a touch): no messages at all otherwise.
+/// up from the middle, the right one down; both at once cancel out (a known limit of that view). So the right trigger
+/// pulled while the left one is held (aim, then fire) shows only as a fall of Z from the top toward the middle, the same
+/// as letting the left one go; <see cref="RightTrigger"/> says which of these it saw.
+/// It listens only while asked (sound effects on, a race, or waiting for a touch): no messages at all otherwise, and
+/// a message only when the pad changes.
 /// </summary>
 sealed class PadInput : IDisposable
 {
@@ -53,6 +56,13 @@ sealed class PadInput : IDisposable
     bool _want;
     volatile float _left;
     long _activeTick;
+    // the right trigger, from the same Z: a pull seen (Z under the middle), a fall from the left side, the level after it
+    volatile bool _known, _held;
+    volatile float _z;
+    long _rightTick, _fallTick;
+    double _zHigh, _fallLevel;                              // the pad thread's only
+    byte[] _report = Array.Empty<byte>();
+    readonly ushort[] _pressed = new ushort[32];
 
     public PadInput()
     {
@@ -74,6 +84,19 @@ sealed class PadInput : IDisposable
     /// <summary>The last press or stick move (TickCount64), 0 for none; seen only while listening.</summary>
     public long ActiveTick => Interlocked.Read(ref _activeTick);
 
+    /// <summary>What the right trigger did lately: Pulled (seen under the middle of Z), Fell (Z fell from the left side:
+    /// fire with the aim held, or the aim let go), Held (Z still where it fell: both may be held, or none), Off, or
+    /// Unknown (not listening, or no Xbox-style pad has spoken since).</summary>
+    public enum Fire { Unknown, Off, Pulled, Fell, Held }
+
+    public Fire RightTrigger(long now, int withinMs)
+    {
+        if (!_known) return Fire.Unknown;
+        if (_z < -0.15 || now - Interlocked.Read(ref _rightTick) < withinMs) return Fire.Pulled;
+        if (now - Interlocked.Read(ref _fallTick) < withinMs) return Fire.Fell;
+        return _held ? Fire.Held : Fire.Off;
+    }
+
     /// <summary>Listen or not; cheap to call every second.</summary>
     public void Listen(bool on)
     {
@@ -91,7 +114,7 @@ sealed class PadInput : IDisposable
         };
         if (!RegisterRawInputDevices(d, (uint)d.Length, (uint)Marshal.SizeOf<RawInputDevice>()))
             Log.Write($"pad: raw input {(on ? "on" : "off")} failed, error {Marshal.GetLastWin32Error()}");
-        if (!on) _left = 0;
+        if (!on) { _left = 0; _z = 0; _known = _held = false; _zHigh = 0; }
     }
 
     void OnInput(IntPtr handle)
@@ -108,9 +131,9 @@ sealed class PadInput : IDisposable
             if (each <= 0 || count <= 0) return;
             var pad = Find(device);
             if (pad == null) return;
-            var report = new byte[each];
-            Marshal.Copy(buf + (int)header + 8 + (count - 1) * each, report, 0, each); // the newest report
-            Read(pad, report);
+            if (_report.Length != each) _report = new byte[each];
+            Marshal.Copy(buf + (int)header + 8 + (count - 1) * each, _report, 0, each); // the newest report
+            Read(pad, _report);
         }
         finally { Marshal.FreeHGlobal(buf); }
     }
@@ -123,12 +146,26 @@ sealed class PadInput : IDisposable
             if (HidP_GetUsageValue(HidP_Input, PageDesktop, a.Link, a.Usage, out uint v, pad.Parsed, report, (uint)report.Length) != HIDP_STATUS_SUCCESS) continue;
             if (a.Usage == UsageHat) { if (v >= 1 && v <= 8) active = true; continue; }
             double c = a.Center(v);
-            if (a.Usage == UsageZ && pad.Xbox) _left = (float)Math.Max(0, c); // left: up to 65408, right: down to 512 (16.11)
+            if (a.Usage == UsageZ && pad.Xbox) Triggers(c); // left: up to 65408, right: down to 512 (16.11)
             if (Math.Abs(c) > 0.3) active = true;
         }
-        uint n = 32; var pressed = new ushort[32];
-        if (HidP_GetUsages(HidP_Input, PageButton, 0, pressed, ref n, pad.Parsed, report, (uint)report.Length) == HIDP_STATUS_SUCCESS && n > 0) active = true;
+        uint n = (uint)_pressed.Length;
+        if (HidP_GetUsages(HidP_Input, PageButton, 0, _pressed, ref n, pad.Parsed, report, (uint)report.Length) == HIDP_STATUS_SUCCESS && n > 0) active = true;
         if (active) Interlocked.Exchange(ref _activeTick, Environment.TickCount64);
+    }
+
+    /// <summary>Both triggers from Z (+1 the left one, -1 the right one). A fall of 0.35 from 0.4 or more is the right
+    /// trigger pulled with the left one held, or the left one let go; while Z stays within 0.25 of where it fell, both
+    /// may still be held.</summary>
+    void Triggers(double z)
+    {
+        long now = Environment.TickCount64;
+        _left = (float)Math.Max(0, z);
+        _z = (float)z; _known = true;
+        if (z < -0.15) Interlocked.Exchange(ref _rightTick, now);
+        if (z > _zHigh) _zHigh = z;
+        else if (_zHigh >= 0.4 && z <= _zHigh - 0.35) { Interlocked.Exchange(ref _fallTick, now); _fallLevel = z; _held = true; _zHigh = z; }
+        if (_held && Math.Abs(z - _fallLevel) > 0.25) _held = false;
     }
 
     Pad? Find(IntPtr device)

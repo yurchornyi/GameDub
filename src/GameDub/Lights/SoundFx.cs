@@ -51,6 +51,9 @@ public enum SoundKind { Impact, Siren, Horn, Shot }
 /// that ends 250 ms after it, and pulses as an impact when the crash descriptions take 0.6 of it. On public sounds
 /// (17.11) it flashed on 0.1-0.3 % of non-crashes, skidding the most; no crash recordings were found, so how many crashes
 /// it catches is tried in Wreckfest. Every check from 0.3 up is logged with the description that won, for tuning.
+/// Whose sound it was (the player's crash or an AI car's, a blast nearby or far off) the model cannot say; for tuning,
+/// the log gives each shot, blast and crash check its loudness and side (+1 all left, -1 all right, 0 the middle,
+/// from the first two channels over its first 60 ms, 250 ms for a crash).
 /// </summary>
 public sealed class SoundFx : IDisposable
 {
@@ -100,13 +103,16 @@ public sealed class SoundFx : IDisposable
     readonly Timer _hop;
     int _busy;
     // loudness over 10 ms blocks: silence skips the model, and an onset starts a sudden sound's cut
-    double _block; int _blockN;
+    double _block, _blockL, _blockR; int _blockN;
+    readonly (double l, double r)[] _sides = new (double, double)[64];   // left and right energy of the last 64 blocks
+    long _blockNo;
     readonly double[] _recent = new double[3];  // the last 30 ms of block loudness, for onsets
     int _recentN;
     long _lastOnset = long.MinValue / 2;
-    readonly List<(long at, double rms)> _onsets = new();      // onsets waiting for their 100 ms after
+    readonly List<(long at, double rms, long block)> _onsets = new();      // onsets waiting for their 60 ms after
     // cuts waiting for the model, on a thread of their own
-    readonly Queue<(float[] around, float[]? around32, double rms, long at, long tick)> _cuts = new();
+    readonly record struct Cut(float[] Around, float[]? Around32, double Rms, double Side, long At, long Block, long Tick);
+    readonly Queue<Cut> _cuts = new();
     readonly SemaphoreSlim _cutReady = new(0);
     readonly Thread _judge;
     volatile bool _stop;
@@ -148,8 +154,8 @@ public sealed class SoundFx : IDisposable
     readonly int[] _crashIdx = Array.Empty<int>();
     readonly string[] _prompts = Array.Empty<string>();
     readonly bool _hear32;                                       // a 32 kHz copy for EfficientAT or CLAP
-    readonly List<long> _crashWait = new();                      // onsets waiting for their 250 ms after
-    readonly Queue<(float[] cut, long tick)> _crashCuts = new();
+    readonly List<(long at, long block, double rms)> _crashWait = new();   // onsets waiting for their 250 ms after
+    readonly Queue<(float[] cut, double rms, double side, long tick)> _crashCuts = new();
     readonly SemaphoreSlim _crashReady = new(0);
     readonly Thread? _crashJudge;
     int _crashChecks, _crashes, _crashLate; double _crashMs, _crashMax;
@@ -253,24 +259,30 @@ public sealed class SoundFx : IDisposable
         if (fmt.Encoding != WaveFormatEncoding.IeeeFloat && fmt.Encoding != WaveFormatEncoding.Extensible) return;
         if (fmt.BitsPerSample != 32) return;
         int ch = fmt.Channels, frames = bytes / 4 / ch;
-        var mono = Mono(buf, frames, ch, fmt.SampleRate, Rate, ref _phase);
+        var lr = new List<(float l, float r)>(frames);
+        var mono = Mono(buf, frames, ch, fmt.SampleRate, Rate, ref _phase, lr);
         var mono32 = _hear32 ? Mono(buf, frames, ch, fmt.SampleRate, CheckRate, ref _phase32) : null;
-        Push(mono, mono32);
+        Push(mono, mono32, lr);
     }
 
-    /// <summary>Mono at the given rate, a box filter over one output period against aliasing.</summary>
-    static List<float> Mono(byte[] buf, int frames, int ch, int srcRate, int rate, ref double phase)
+    /// <summary>Mono at the given rate, a box filter over one output period against aliasing; with lr, also the first
+    /// two channels (left and right) the same way.</summary>
+    static List<float> Mono(byte[] buf, int frames, int ch, int srcRate, int rate, ref double phase, List<(float l, float r)>? lr = null)
     {
         double step = srcRate / (double)rate;
-        int avg = Math.Max(1, (int)Math.Round(step));
+        int avg = Math.Max(1, (int)Math.Round(step)), right = ch >= 2 ? 1 : 0;
         var mono = new List<float>(frames / Math.Max(1, (int)step) + 2);
         for (; phase < frames; phase += step)
         {
             int start = (int)phase;
-            double sum = 0; int n = 0;
+            double sum = 0, l = 0, r = 0; int n = 0;
             for (int k = start; k < start + avg && k < frames; k++, n++)
+            {
                 for (int c = 0; c < ch; c++) sum += BitConverter.ToSingle(buf, (k * ch + c) * 4);
+                if (lr != null) { l += BitConverter.ToSingle(buf, k * ch * 4); r += BitConverter.ToSingle(buf, (k * ch + right) * 4); }
+            }
             mono.Add(n == 0 ? 0 : (float)(sum / (n * ch)));
+            lr?.Add(n == 0 ? (0, 0) : ((float)(l / n), (float)(r / n)));
         }
         phase -= frames;
         return mono;
@@ -298,52 +310,54 @@ public sealed class SoundFx : IDisposable
         }
     }
 
-    /// <summary>16 kHz mono samples from the loopback, and the same sound at 32 kHz for the blast check.</summary>
-    void Push(List<float> mono, List<float>? mono32)
+    /// <summary>16 kHz mono samples from the loopback with their left and right, and the same sound at 32 kHz for the checks.</summary>
+    void Push(List<float> mono, List<float>? mono32, List<(float l, float r)> lr)
     {
-        List<(float[] around, float[]? around32, double rms, long at)>? ready = null;
-        List<float[]>? crashCuts = null;
+        List<(float[] around, float[]? around32, double rms, double side, long at, long block)>? ready = null;
+        List<(float[] cut, double rms, double side)>? crashCuts = null;
         lock (_gate)
         {
             if (mono32 != null)
                 foreach (float v in mono32) { _ring32[_write32] = v; _write32 = (_write32 + 1) % _ring32.Length; }
-            foreach (float v in mono)
+            for (int i = 0; i < mono.Count; i++)
             {
+                float v = mono[i];
                 _ring[_write] = v;
                 _write = (_write + 1) % _ring.Length;
                 _samples++;
-                Gate(v);
+                var (l, r) = i < lr.Count ? lr[i] : (v, v);
+                Gate(v, l, r);
             }
             // onsets whose 100 ms after have come: cut them out for the model
             while (_onsets.Count > 0 && _samples - _onsets[0].at >= PostSamples)
             {
-                var (at, rms) = _onsets[0];
+                var (at, rms, block) = _onsets[0];
                 _onsets.RemoveAt(0);
                 if (Paused) continue;
                 var around = new float[Window];                       // the second that ends 60 ms after the onset
                 int aStart = (_write - Window + _ring.Length) % _ring.Length;
                 for (int k = 0; k < Window; k++) around[k] = _ring[(aStart + k) % _ring.Length];
                 float[]? around32 = mono32 != null ? Cut32() : null;   // the same second at 32 kHz, for the checks
-                (ready ??= new()).Add((around, around32, rms, at));
+                (ready ??= new()).Add((around, around32, rms, Side(block), at, block));
             }
             // possible crashes whose 250 ms after have come: cut them out for CLAP
             while (_crashWait.Count > 0 && _samples - _crashWait[0] >= CrashPostSamples)
             {
-                long at = _crashWait[0];
+                var (at, block, rms) = _crashWait[0];
                 _crashWait.RemoveAt(0);
                 if (Paused || mono32 == null || _samples - at > CrashPostSamples + Rate / 10) continue; // came in late: skip
-                (crashCuts ??= new()).Add(Cut32());
+                (crashCuts ??= new()).Add((Cut32(), rms, Side(block)));
             }
         }
-        if (ready != null) foreach (var (around, around32, rms, at) in ready) Hand(around, around32, rms, at);
+        if (ready != null) foreach (var (around, around32, rms, side, at, block) in ready) Hand(around, around32, rms, side, at, block);
         if (crashCuts != null)
         {
             long now = Environment.TickCount64;
             lock (_crashCuts)
-                foreach (var c in crashCuts)
+                foreach (var (cut, rms, side) in crashCuts)
                 {
                     if (_crashCuts.Count >= 2) { _crashCuts.Dequeue(); _crashLate++; }
-                    _crashCuts.Enqueue((c, now));
+                    _crashCuts.Enqueue((cut, rms, side, now));
                     _crashReady.Release();
                 }
         }
@@ -359,12 +373,13 @@ public sealed class SoundFx : IDisposable
     }
 
     /// <summary>Every 10 ms block: the loudness for the silence gate, and an onset, a jump to 1.6 times the last 30 ms.</summary>
-    void Gate(float v)
+    void Gate(float v, float l, float r)
     {
-        _block += v * v;
+        _block += v * v; _blockL += l * l; _blockR += r * r;
         if (++_blockN < Block) return;
         double rms = Math.Sqrt(_block / _blockN);
-        _block = 0; _blockN = 0;
+        _sides[_blockNo++ % _sides.Length] = (_blockL, _blockR);
+        _block = _blockL = _blockR = 0; _blockN = 0;
         _peak = Math.Max(_peak * 0.95, rms);
         double before = 0; for (int i = 0; i < _recent.Length; i++) before += _recent[i];
         before /= _recent.Length;
@@ -373,12 +388,20 @@ public sealed class SoundFx : IDisposable
         // most shots of a burst in GTA 5, 16.11)
         if (rms < 0.01 || rms < 1.6 * before || _samples - _lastOnset < OnsetGap) return;
         _lastOnset = _samples;
-        if (_onsets.Count < 8) _onsets.Add((_samples - Block, rms));   // from the start of the block that jumped
+        if (_onsets.Count < 8) _onsets.Add((_samples - Block, rms, _blockNo - 1));   // from the start of the block that jumped
+    }
+
+    /// <summary>Where a sound came from, from its first block on (under _gate): +1 all left, -1 all right, 0 the middle.</summary>
+    double Side(long fromBlock)
+    {
+        double l = 0, r = 0;
+        for (long b = Math.Max(fromBlock, _blockNo - _sides.Length); b < _blockNo; b++) { var e = _sides[b % _sides.Length]; l += e.l; r += e.r; }
+        return l + r > 1e-9 ? (l - r) / (l + r) : 0;
     }
 
     /// <summary>A cut for the model. Within 300 ms of a shot, a sound at least 40 % as loud as it is the next shot of the
     /// burst and flashes at once, without waiting for the model, so a burst flashes shot by shot.</summary>
-    void Hand(float[] around, float[]? around32, double rms, long at)
+    void Hand(float[] around, float[]? around32, double rms, double side, long at, long block)
     {
         long now = Environment.TickCount64;
         bool fast = false;
@@ -389,7 +412,7 @@ public sealed class SoundFx : IDisposable
             if (!fast)
             {
                 if (_cuts.Count >= 4) { _cuts.Dequeue(); _late++; }
-                _cuts.Enqueue((around, around32, rms, at, now));
+                _cuts.Enqueue(new Cut(around, around32, rms, side, at, block, now));
             }
         }
         if (fast) { _fast++; Shoot(rms, now); }
@@ -401,15 +424,15 @@ public sealed class SoundFx : IDisposable
         while (!_stop)
         {
             _cutReady.Wait(1000);
-            (float[] around, float[]? around32, double rms, long at, long tick) cut;
+            Cut cut;
             lock (_cuts)
             {
                 if (_cuts.Count == 0) continue;
                 cut = _cuts.Dequeue();
             }
             if (_stop) return;
-            if (Environment.TickCount64 - cut.tick > StaleMs) { _late++; continue; }
-            try { Judge(cut.around, cut.around32, cut.rms, cut.at); }
+            if (Environment.TickCount64 - cut.Tick > StaleMs) { _late++; continue; }
+            try { Judge(cut); }
             catch (Exception ex) { Log.Error("soundfx judge", ex); }
         }
     }
@@ -418,8 +441,10 @@ public sealed class SoundFx : IDisposable
     /// One sudden sound, judged on the second that ends 60 ms after it began: a shot blinks, a blast or a crash pulses,
     /// a footstep, a click, speech or music does nothing.
     /// </summary>
-    void Judge(float[] around, float[]? around32, double rms, long at)
+    void Judge(Cut cut)
     {
+        var (around, around32, rms) = (cut.Around, cut.Around32, cut.Rms);
+        string heardAs = $", loud {rms:F2}, side {cut.Side:+0.00;-0.00;0.00}";
         long t0 = Stopwatch.GetTimestamp();
         var h = Scores(around);
         double gun = h.Max(_gun), impact = h.Max(_impact), foot = h.Max(_foot), door = h.Max(_door);
@@ -452,17 +477,17 @@ public sealed class SoundFx : IDisposable
         if (shot)
         {
             // a burst is many shots: the log names the first of each and how many followed
-            if (now - _shotLogTick > 2000) { Log.Write($"soundfx: Shot («{_names[top]}», {_shotsSinceLog} more before)"); _shotLogTick = now; _shotsSinceLog = 0; }
+            if (now - _shotLogTick > 2000) { Log.Write($"soundfx: Shot («{_names[top]}», {_shotsSinceLog} more before{heardAs})"); _shotLogTick = now; _shotsSinceLog = 0; }
             else _shotsSinceLog++;
             Shoot(rms, now);
         }
         else if (blast)
         {
             _impacts++;
-            Fire(SoundKind.Impact, impact, impactScore, now, _names[top], check >= 0 ? $", check {check:F2}" : null);
+            Fire(SoundKind.Impact, impact, impactScore, now, _names[top], (check >= 0 ? $", check {check:F2}" : "") + heardAs);
         }
         else if (_clap != null && EngineHeardWithin(CrashEngineMs) && h.Max(_hint) >= HintScore)
-            lock (_gate) if (_crashWait.Count < 4) _crashWait.Add(at);
+            lock (_gate) if (_crashWait.Count < 4) _crashWait.Add((cut.At, cut.Block, rms));
     }
 
     void CrashLoop()
@@ -470,7 +495,7 @@ public sealed class SoundFx : IDisposable
         while (!_stop)
         {
             _crashReady.Wait(1000);
-            (float[] cut, long tick) c;
+            (float[] cut, double rms, double side, long tick) c;
             lock (_crashCuts)
             {
                 if (_crashCuts.Count == 0) continue;
@@ -487,8 +512,9 @@ public sealed class SoundFx : IDisposable
                     _crashChecks++; _crashMs += Stopwatch.GetElapsedTime(t0).TotalMilliseconds; _crashMax = Math.Max(_crashMax, crash);
                     if (crash >= CrashScore) _crashes++;
                 }
-                if (crash >= CrashScore) Fire(SoundKind.Impact, crash, CrashScore, Environment.TickCount64, $"crash, {_prompts[top]}");
-                else if (crash >= CrashLogScore) Log.Write($"soundfx: crash check {crash:F2} («{_prompts[top]}»), no flash");
+                string heardAs = $", loud {c.rms:F2}, side {c.side:+0.00;-0.00;0.00}";
+                if (crash >= CrashScore) Fire(SoundKind.Impact, crash, CrashScore, Environment.TickCount64, $"crash, {_prompts[top]}", heardAs);
+                else if (crash >= CrashLogScore) Log.Write($"soundfx: crash check {crash:F2} («{_prompts[top]}»), no flash{heardAs}");
             }
             catch (Exception ex) { Log.Error("soundfx crash", ex); }
         }
