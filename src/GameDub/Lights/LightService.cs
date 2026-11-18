@@ -41,9 +41,9 @@ public sealed class LightService : IDisposable
     // and the model take 0.1-0.25 s); a burst goes on while its shots come less than 1 s apart (the model misses some)
     const int FireMs = 600, BurstGapMs = 1000;
     const double MineLoudness = 0.4;   // with the aim held, the player's shot is at least this share of the loudest lately
-    // both triggers on the middle of Z: held together, or both let go. A shot at least half as loud as the player's own gun
+    // both triggers on the middle of Z: held together, or both let go. A shot at least 60 % as loud as the player's own gun
     // (learned from his sure shots, forgotten by half in a minute) is his.
-    const double MyGunShare = 0.5;
+    const double MyGunShare = 0.6;
     static readonly Pulse ChargePulse = new(150, 600, 900), ShiftBlink = new(20, 60, 80),
         ShotPulse = new(10, 30, 150); // one shot: a quick orange blink, so a burst reads as separate shots
     /// <summary>An impact by its strength 0..1: 0.4 s and dim for a touch, 1.6 s and bright for a heavy crash.</summary>
@@ -189,8 +189,10 @@ public sealed class LightService : IDisposable
     /// (an automatic burst with both held). No pad to read (another kind of pad, or none has spoken yet): every shot, as
     /// before. In a car the right trigger is the gas, so there all shots show.
     /// Letting the aim go looks like that fall too, and the police shots right after it flashed (GTA Online, 18.11: «коли я
-    /// постріляв, тоді блимає»), so after a fall a shot counts only when it is loud, at least 40 % of the loudest shot
-    /// lately (the player's own gun is the loudest; far shots were 0.02-0.1 of it). Under _gate.
+    /// постріляв, тоді блимає»), so with the aim in play a shot counts only when it is as loud as the player's own gun:
+    /// at least 60 % of it (learned from his sure shots; the police's were up to half of it). A burst no longer carries
+    /// itself on: the police's fire kept the lights going after he stopped («я постріляв і перестав, воно далі показувало»,
+    /// 18.11). Before his gun is known: 40 % of the loudest shot lately, and a burst under 1 s apart. Under _gate.
     /// </summary>
     bool MyShot(long now, double strength, double loud)
     {
@@ -198,19 +200,20 @@ public sealed class LightService : IDisposable
         bool strong = strength >= MineLoudness;
         double myGun = _myGun * Math.Pow(0.5, (now - _myGunTick) / 60_000.0);
         // with both triggers held together Z stays in the middle (GTA Online, 18.11: most of the player's long bursts were
-        // dark this way, «Held», as loud as the loudest): his gun's own loudness tells, or else a burst going on
-        bool asMyGun = myGun > 0 ? loud >= MyGunShare * myGun : strength >= 0.8;
+        // dark this way, «Held», as loud as the loudest): his gun's own loudness tells
+        bool asMyGun = myGun > 0 && loud >= MyGunShare * myGun;
         bool mine = fire switch
         {
             PadInput.Fire.Unknown or PadInput.Fire.Pulled => true,
-            PadInput.Fire.Fell => strong && (myGun <= 0 || loud >= 0.3 * myGun),   // a light touch of the aim is a fall too
-            PadInput.Fire.Held => asMyGun || (strong && now - _mineTick < BurstGapMs),
+            PadInput.Fire.Fell => myGun > 0 ? asMyGun : strong,
+            PadInput.Fire.Held => myGun > 0 ? asMyGun : strong && now - _mineTick < BurstGapMs,
             _ => false,
         };
         string how = $"trigger {fire}, Z {_pad.Z:F2}, strength {strength:F2}, loud {loud:F3}, own gun {myGun:F3}";
         if (mine)
         {
             if (fire is PadInput.Fire.Pulled or PadInput.Fire.Fell && strong) { _myGun = Math.Max(myGun, loud); _myGunTick = now; }
+            else if (myGun > 0 && loud >= MyGunShare * myGun) _myGunTick = now; // still his gun: keep it in mind
             if (now - _mineTick > 2000) Log.Write($"lights: the player's shot ({how})");
             _mineTick = now; _shotsMine++; return true;
         }

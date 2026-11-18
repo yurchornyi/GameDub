@@ -357,7 +357,7 @@ public sealed class SoundFx : IDisposable
             }
             if (_fastShots.Count > 0) { fast = new(_fastShots); _fastShots.Clear(); }
         }
-        if (fast != null) foreach (var (rms, at) in fast) { _fast++; Shoot(rms, Environment.TickCount64, at); }
+        if (fast != null) foreach (var (rms, at) in fast) { _fast++; Shoot(rms, Environment.TickCount64, at, next: true); }
         if (ready != null) foreach (var (around, around32, rms, side, at, block) in ready) Hand(around, around32, rms, side, at, block);
         if (crashCuts != null && _crasher != null)
             foreach (var (cut, rms, side, at) in crashCuts) _crasher.Add(() => CrashCheck(cut, rms, side, at));
@@ -557,14 +557,15 @@ public sealed class SoundFx : IDisposable
     }
 
     /// <summary>A shot's flash, as bright as the shot is loud against the loudest shot lately: the player's own about 1.</summary>
-    void Shoot(double rms, long now, long at)
+    void Shoot(double rms, long now, long at, bool next = false)
     {
         double strength;
         lock (_shotGate)
         {
             _loudestShot = Math.Max(rms, _loudestShot);
             strength = Math.Clamp(rms / _loudestShot, 0, 1);
-            _gunTick = now; _gunRms = rms; _shots++;
+            // a next shot keeps the burst's loudness: else 40 % of 40 % of... let echoes and others' fire carry a burst on
+            _gunTick = now; _gunRms = next ? Math.Max(_gunRms, rms) : rms; _shots++;
         }
         Lag(at, shot: true);
         try { Effect?.Invoke(SoundKind.Shot, strength, rms); } catch (Exception ex) { Log.Error("soundfx effect", ex); }
