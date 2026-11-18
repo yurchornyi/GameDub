@@ -1,7 +1,8 @@
 name: sound-models
 
-# Exports EfficientAT (the stick lighting's blast check) to ONNX and checks it against PyTorch and on a real sound.
-# Runs when the script changes, or by hand; its artifact is what the efficientat-1 release holds.
+# Exports the stick lighting's helper models to ONNX (EfficientAT, the blast check; CLAP, the crash check) and checks
+# them against PyTorch and on real sounds. Runs when the script changes, or by hand; its artifact is what the
+# efficientat-1 and clap-1 releases hold.
 on:
   pull_request:
     paths:
@@ -30,9 +31,11 @@ jobs:
         run: python src/tools/sound-models/export.py --out work/models --work work/src
       - uses: actions/upload-artifact@v4
         with:
-          name: efficientat
+          name: sound-models
           path: |
             work/models/efficientat.onnx
             work/models/efficientat_class_map.csv
+            work/models/clap.onnx
+            work/models/clap_prompts.csv
             work/models/export.json
           retention-days: 14

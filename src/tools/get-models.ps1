@@ -1,4 +1,4 @@
-# Downloads the offline models into C:\GameDub\models (~760 MB). Both are optional:
+# Downloads the offline models into C:\GameDub\models (~790 MB). Both are optional:
 # without them GameDub uses online translation and the free Edge voices.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -43,6 +43,15 @@ foreach ($f in 'efficientat.onnx', 'efficientat_class_map.csv') {
     if (Test-Path $out) { continue }
     Write-Host "  $f"
     Invoke-WebRequest "https://github.com/yurchornyi/GameDub/releases/download/efficientat-1/$f" -OutFile $out -UseBasicParsing
+}
+
+Write-Host 'CLAP (int8) - hears car crashes in racing games (LAION, Apache-2.0), ~32 MB'
+New-Item -ItemType Directory -Force "$root\clap" | Out-Null
+foreach ($f in 'clap.onnx', 'clap_prompts.csv') {
+    $out = "$root\clap\$f"
+    if (Test-Path $out) { continue }
+    Write-Host "  $f"
+    Invoke-WebRequest "https://github.com/yurchornyi/GameDub/releases/download/clap-1/$f" -OutFile $out -UseBasicParsing
 }
 
 Write-Host 'Done.'
