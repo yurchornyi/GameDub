@@ -84,7 +84,7 @@ public sealed class SoundFx : IDisposable
     // the crash check (CLAP): on the second that ends 250 ms after the onset, while an engine was heard within 8 s
     const int CrashPostSamples = Rate * 250 / 1000, CrashStaleMs = 450, CrashEngineMs = 8000;
     const int ClapRate = 48000, ClapSamples = ClapRate * 10;
-    const double HintScore = 0.05, CrashJump = 2.5, CrashScore = 0.6, CrashLogScore = 0.1;
+    const double HintScore = 0.05, CrashJump = 2.5, CrashScore = 0.6, RaceCrashScore = 0.35, CrashLogScore = 0.1;
     const int CrashEveryMs = 1000;          // one CLAP check a second at most: ~0.3 s of two threads each, beside the game
     // what a crash may sound like to YAMNet: only these go on to CLAP
     static readonly string[] HintNames = { "Smash, crash", "Bang", "Thump, thud", "Slam", "Breaking", "Crushing", "Clang",
@@ -150,6 +150,11 @@ public sealed class SoundFx : IDisposable
 
     /// <summary>No listening while nobody sees the lights (screen off, the console on a TV): no work for the model.</summary>
     public volatile bool Paused;
+
+    /// <summary>A racing game is in front (its Steam genre): there every sudden sound goes to CLAP, and a crash lights
+    /// at 0.35. Wreckfest, 18.11: under its engine YAMNet heard no hit at all (hint 0.01), the largest jump of a minute of
+    /// crashes was 2.5, and the one hit CLAP heard scored 0.37.</summary>
+    public volatile bool Racing;
 
     public static string ModelDir => Path.Combine(Paths.Root, "models", "yamnet");
     public static bool ModelPresent => File.Exists(Path.Combine(ModelDir, "yamnet.onnx")) && File.Exists(Path.Combine(ModelDir, "yamnet_class_map.csv"));
@@ -477,11 +482,12 @@ public sealed class SoundFx : IDisposable
         if ((!blast || checking) && _clap != null && EngineHeardWithin(CrashEngineMs))
         {
             double hint = h.Max(_hint);
-            bool byHint = hint >= HintScore, byJump = cut.Jump >= CrashJump;
+            bool racing = Racing, byHint = hint >= HintScore, byJump = racing || cut.Jump >= CrashJump;
             lock (_gate)
             {
                 _raceJump = Math.Max(_raceJump, cut.Jump); _raceHint = Math.Max(_raceHint, hint);
-                if ((byHint || byJump) && now - _crashCandTick >= CrashEveryMs && _crashWait.Count < 4)
+                // in a race the crash thread's own queue keeps the newest two; elsewhere one a second at most
+                if ((byHint || byJump) && (racing || now - _crashCandTick >= CrashEveryMs) && _crashWait.Count < 4)
                 {
                     _crashCandTick = now;
                     if (byHint) _byHint++; else _byJump++;
@@ -511,13 +517,14 @@ public sealed class SoundFx : IDisposable
     {
         long t0 = Stopwatch.GetTimestamp();
         var (crash, top) = Crash(cut);
+        double score = Racing ? RaceCrashScore : CrashScore;
         lock (_clipTops)
         {
             _crashChecks++; _crashMs += Stopwatch.GetElapsedTime(t0).TotalMilliseconds; _crashMax = Math.Max(_crashMax, crash);
-            if (crash >= CrashScore) _crashes++;
+            if (crash >= score) _crashes++;
         }
         string heardAs = $", loud {rms:F2}, side {side:+0.00;-0.00;0.00}, jump {jump:F1}, hint {hint:F2}";
-        if (crash >= CrashScore) Fire(SoundKind.Impact, crash, CrashScore, Environment.TickCount64, $"crash, {_prompts[top]}", heardAs, at);
+        if (crash >= score) Fire(SoundKind.Impact, crash, score, Environment.TickCount64, $"crash, {_prompts[top]}", heardAs, at);
         else if (crash >= CrashLogScore) Log.Write($"soundfx: crash check {crash:F2} («{_prompts[top]}»), no flash{heardAs}");
     }
 
