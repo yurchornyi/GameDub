@@ -43,7 +43,7 @@ public sealed class LightService : IDisposable
     const double MineLoudness = 0.4;   // with the aim held, the player's shot is at least this share of the loudest lately
     // both triggers on the middle of Z: held together, or both let go. A shot at least 60 % as loud as the player's own gun
     // (learned from his sure shots, forgotten by half in a minute) is his.
-    const double MyGunShare = 0.6;
+    const double MyGunShare = 0.55;
     static readonly Pulse ChargePulse = new(150, 600, 900), ShiftBlink = new(20, 60, 80),
         ShotPulse = new(10, 30, 150); // one shot: a quick orange blink, so a burst reads as separate shots
     /// <summary>An impact by its strength 0..1: 0.4 s and dim for a touch, 1.6 s and bright for a heavy crash.</summary>
@@ -212,7 +212,8 @@ public sealed class LightService : IDisposable
         string how = $"trigger {fire}, Z {_pad.Z:F2}, strength {strength:F2}, loud {loud:F3}, own gun {myGun:F3}";
         if (mine)
         {
-            if (fire is PadInput.Fire.Pulled or PadInput.Fire.Fell && strong) { _myGun = Math.Max(myGun, loud); _myGunTick = now; }
+            // an average of his sure shots: the loudest one alone (a near blast read as a shot) set the bar too high (18.11)
+            if (fire is PadInput.Fire.Pulled or PadInput.Fire.Fell && strong) { _myGun = myGun > 0 ? myGun + 0.3 * (loud - myGun) : loud; _myGunTick = now; }
             else if (myGun > 0 && loud >= MyGunShare * myGun) _myGunTick = now; // still his gun: keep it in mind
             if (now - _mineTick > 2000) Log.Write($"lights: the player's shot ({how})");
             _mineTick = now; _shotsMine++; return true;

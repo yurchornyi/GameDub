@@ -61,7 +61,10 @@ sealed class PadInput : IDisposable
     volatile float _z;
     long _rightTick, _fallTick, _zMoveTick;
     double _zPrev;
-    const int HeldMs = 5000;                                // a magazine in GTA is ~3 s of automatic fire
+    const int HeldMs = 5000;
+    // Z under the middle means the right trigger is pressed more than the left: a trigger at rest reads exactly 0, so even
+    // a little counts. Both held in GTA read -0.02..-0.03 (the aim stops short of full), which -0.15 missed (18.11).
+    const double RightPulled = -0.015;                                // a magazine in GTA is ~3 s of automatic fire
     double _zHigh, _aim;                                    // the pad thread's only; _aim: Z with the left one alone
     byte[] _report = Array.Empty<byte>();
     readonly ushort[] _pressed = new ushort[32];
@@ -97,7 +100,7 @@ sealed class PadInput : IDisposable
     public Fire RightTrigger(long now, int withinMs)
     {
         if (!_known) return Fire.Unknown;
-        if (_z < -0.15 || now - Interlocked.Read(ref _rightTick) < withinMs) return Fire.Pulled;
+        if (_z < RightPulled || now - Interlocked.Read(ref _rightTick) < withinMs) return Fire.Pulled;
         if (now - Interlocked.Read(ref _fallTick) < withinMs) return Fire.Fell;
         return _held && now - Interlocked.Read(ref _zMoveTick) < HeldMs ? Fire.Held : Fire.Off;
     }
@@ -170,7 +173,7 @@ sealed class PadInput : IDisposable
         _z = (float)z; _known = true;
         if (Math.Abs(z - _zPrev) > 0.02) Interlocked.Exchange(ref _zMoveTick, now);
         _zPrev = z;
-        if (z < -0.15) Interlocked.Exchange(ref _rightTick, now);
+        if (z < RightPulled) Interlocked.Exchange(ref _rightTick, now);
         if (z > _zHigh) _zHigh = z;
         else if (_zHigh >= 0.4 && z <= _zHigh - 0.08)
         {

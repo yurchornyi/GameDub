@@ -31,8 +31,9 @@ public enum SoundKind { Impact, Siren, Horn, Shot }
 ///   a cut alone in silence (the model averages over its second: "Silence"), a cut repeated over the second
 ///   (footsteps then read as gunfire).
 /// - Lasting sounds (sirens, horns, an engine) are looked at twice a second over the last second. A siren
-///   is shown only once two looks in a row hear it, and kept while it is heard within 2.5 s: in GTA 5 the model heard
-///   police sirens on and off, and the lights flickered.
+///   is shown once two looks within 1.5 s hear it, and kept while it is heard within 2.5 s: in GTA 5 the model heard
+///   police sirens on and off, and the lights flickered; two looks in a row missed a car alarm, which beeps on and off
+///   (GTA Online, 18.11: «Car alarm» up to 0.62, never twice in a row).
 /// A loudness detector without the model was tried for crashes (16.11) and dropped: it flashed on starts, menus and
 /// gear shifts in Wreckfest.
 /// A blast is checked by a second model, EfficientAT (mn10_as, JKU Linz, AudioSet, mAP 0.47 against YAMNet's 0.31),
@@ -131,7 +132,7 @@ public sealed class SoundFx : IDisposable
     // sudden sounds over a minute, for the log
     int _cutsMade, _judged, _late, _fast, _shots, _impacts; double _clipGun, _clipImpact, _judgeMs;
     readonly Dictionary<string, int> _clipTops = new();
-    long _lastEffectTick, _sirenOnUntil, _shotLogTick; int _shotsSinceLog; bool _sirenLookPrev;
+    long _lastEffectTick, _sirenOnUntil, _shotLogTick; int _shotsSinceLog; long _sirenHitTick, _sirenLogTick;
     readonly long[] _lastHeard = new long[Enum.GetValues<SoundKind>().Length];
     // what was heard, for the log: strongest effect scores and the loudest top class over a minute
     double _sumImpact, _sumGun, _sumSiren, _sumHorn; string _top = ""; double _topScore; int _hops; long _statTick;
@@ -606,9 +607,20 @@ public sealed class SoundFx : IDisposable
             Stats(scores, frames, impact, gun, siren, horn, now);
             // Sudden sounds are judged one by one as they come (Judge); a look would show them up to a second late.
             // a siren and a horn fire every look while they last: their lights follow the sound
-            // a siren: two looks in a row to start, then on while heard within 2.5 s, so it neither flickers nor starts on a blip
-            if (siren >= SirenScore && _sirenLookPrev) _sirenOnUntil = now + 2500;
-            _sirenLookPrev = siren >= SirenScore;
+            // a siren: two looks within 1.5 s to start (an alarm beeps on and off), then on while heard within 2.5 s, so it
+            // neither flickers nor starts on a blip
+            if (siren >= SirenScore)
+            {
+                if (now - _sirenHitTick <= 1500) _sirenOnUntil = now + 2500;
+                else if (now - _sirenLogTick > 5000)
+                {
+                    int best = _siren[0]; double bestScore = 0;
+                    for (int f = 0; f < frames; f++) foreach (var i in _siren) if (scores[f, i] > bestScore) { bestScore = scores[f, i]; best = i; }
+                    Log.Write($"soundfx: siren heard once, {siren:F2} («{_names[best]}»), waiting for a second look");
+                    _sirenLogTick = now;
+                }
+                _sirenHitTick = now;
+            }
             if (siren >= SirenKeep && now < _sirenOnUntil) _sirenOnUntil = now + 2500;
             if (now < _sirenOnUntil) Fire(SoundKind.Siren, Math.Max(siren, SirenScore), SirenScore, now);
             if (horn > 0.4) Fire(SoundKind.Horn, horn, 0.4, now);
