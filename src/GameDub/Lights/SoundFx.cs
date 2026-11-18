@@ -341,7 +341,7 @@ public sealed class SoundFx : IDisposable
                 (ready ??= new()).Add((around, around32, rms, Side(block), at, block));
             }
             // possible crashes whose 250 ms after have come: cut them out for CLAP
-            while (_crashWait.Count > 0 && _samples - _crashWait[0] >= CrashPostSamples)
+            while (_crashWait.Count > 0 && _samples - _crashWait[0].at >= CrashPostSamples)
             {
                 var (at, block, rms) = _crashWait[0];
                 _crashWait.RemoveAt(0);
