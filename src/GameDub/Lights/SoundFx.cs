@@ -325,7 +325,7 @@ public sealed class SoundFx : IDisposable
     /// <summary>16 kHz mono samples from the loopback with their left and right, and the same sound at 32 kHz for the checks.</summary>
     void Push(List<float> mono, List<float>? mono32, List<(float l, float r)> lr)
     {
-        List<(float[] around, float[]? around32, double rms, double side, long at, long block)>? ready = null;
+        List<(float[] around, float[]? around32, double rms, double side, long at, long block, double jump)>? ready = null;
         List<(float[] cut, double rms, double side, long at, double jump, double hint)>? crashCuts = null;
         List<(double rms, long at)>? fast = null;
         lock (_gate)
