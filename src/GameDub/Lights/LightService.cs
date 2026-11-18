@@ -41,6 +41,9 @@ public sealed class LightService : IDisposable
     // and the model take 0.1-0.25 s); a burst goes on while its shots come less than 1 s apart (the model misses some)
     const int FireMs = 600, BurstGapMs = 1000;
     const double MineLoudness = 0.4;   // with the aim held, the player's shot is at least this share of the loudest lately
+    // both triggers on the middle of Z: held together, or both let go. A shot at least half as loud as the player's own gun
+    // (learned from his sure shots, forgotten by half in a minute) is his.
+    const double MyGunShare = 0.5;
     static readonly Pulse ChargePulse = new(150, 600, 900), ShiftBlink = new(20, 60, 80),
         ShotPulse = new(10, 30, 150); // one shot: a quick orange blink, so a burst reads as separate shots
     /// <summary>An impact by its strength 0..1: 0.4 s and dim for a touch, 1.6 s and bright for a heavy crash.</summary>
@@ -82,6 +85,7 @@ public sealed class LightService : IDisposable
     long _fxStart; int _fxMs; SoundKind? _fx; double _fxStrength;
     long _shotStart; double _shotStrength; // the last shot: its own short pulse, over an impact's longer one
     long _mineTick, _darkLogTick; int _shotsMine, _shotsDark; // the player's last own shot; shots over a minute, for the log
+    double _myGun; long _myGunTick;                           // the loudness of the player's own gun, from his sure shots
     // a siren or a horn heard in the game: lit from its start until its until, moved on while it is heard
     long _sirenStart, _sirenUntil, _hornStart, _hornUntil; double _hornStrength;
     // states
@@ -143,7 +147,7 @@ public sealed class LightService : IDisposable
         _kick.Set();
     }
 
-    void OnSound(SoundKind kind, double strength)
+    void OnSound(SoundKind kind, double strength, double loud = 0)
     {
         if (_docked) return;                  // on a TV: the sticks are out of sight and the pad in hand is another one
         AppSettings s; lock (_gate) s = _s;
@@ -156,7 +160,7 @@ public sealed class LightService : IDisposable
             switch (kind)
             {
                 case SoundKind.Shot:
-                    if (!MyShot(now, strength)) return;
+                    if (!MyShot(now, strength, loud)) return;
                     _shotStart = now; _shotStrength = strength;
                     break;
                 case SoundKind.Siren:
@@ -188,24 +192,30 @@ public sealed class LightService : IDisposable
     /// постріляв, тоді блимає»), so after a fall a shot counts only when it is loud, at least 40 % of the loudest shot
     /// lately (the player's own gun is the loudest; far shots were 0.02-0.1 of it). Under _gate.
     /// </summary>
-    bool MyShot(long now, double strength)
+    bool MyShot(long now, double strength, double loud)
     {
         var fire = _pad.RightTrigger(now, FireMs);
-        bool loud = strength >= MineLoudness;
+        bool strong = strength >= MineLoudness;
+        double myGun = _myGun * Math.Pow(0.5, (now - _myGunTick) / 60_000.0);
+        // with both triggers held together Z stays in the middle (GTA Online, 18.11: most of the player's long bursts were
+        // dark this way, «Held», as loud as the loudest): his gun's own loudness tells, or else a burst going on
+        bool asMyGun = myGun > 0 ? loud >= MyGunShare * myGun : strength >= 0.8;
         bool mine = fire switch
         {
             PadInput.Fire.Unknown or PadInput.Fire.Pulled => true,
-            PadInput.Fire.Fell => loud,
-            PadInput.Fire.Held => loud && now - _mineTick < BurstGapMs,
+            PadInput.Fire.Fell => strong,
+            PadInput.Fire.Held => asMyGun || (strong && now - _mineTick < BurstGapMs),
             _ => false,
         };
+        string how = $"trigger {fire}, Z {_pad.Z:F2}, strength {strength:F2}, loud {loud:F3}, own gun {myGun:F3}";
         if (mine)
         {
-            if (now - _mineTick > 2000) Log.Write($"lights: the player's shot (trigger {fire}, Z {_pad.Z:F2}, strength {strength:F2})");
+            if (fire is PadInput.Fire.Pulled or PadInput.Fire.Fell && strong) { _myGun = Math.Max(myGun, loud); _myGunTick = now; }
+            if (now - _mineTick > 2000) Log.Write($"lights: the player's shot ({how})");
             _mineTick = now; _shotsMine++; return true;
         }
         _shotsDark++;
-        if (now - _darkLogTick > 2000) { _darkLogTick = now; Log.Write($"lights: a shot left dark, not the player's (trigger {fire}, Z {_pad.Z:F2}, strength {strength:F2})"); }
+        if (now - _darkLogTick > 2000) { _darkLogTick = now; Log.Write($"lights: a shot left dark, not the player's ({how})"); }
         return false;
     }
 

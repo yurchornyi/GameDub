@@ -92,8 +92,9 @@ public sealed class SoundFx : IDisposable
         "Engine", "Light engine (high frequency)", "Medium engine (mid frequency)", "Heavy engine (low frequency)", "Idling",
         "Accelerating, revving, vroom", "Tire squeal", "Skidding" };
 
-    /// <summary>Kind and strength of a detected effect: 0 just over its threshold, 1 as sure as the model gets.</summary>
-    public event Action<SoundKind, double>? Effect;
+    /// <summary>Kind and strength of a detected effect (0 just over its threshold, 1 as sure as the model gets), and for a
+    /// shot its loudness (the onset's RMS; 0 for the rest).</summary>
+    public event Action<SoundKind, double, double>? Effect;
 
     readonly InferenceSession _model;
     readonly string _input, _output;
@@ -566,7 +567,7 @@ public sealed class SoundFx : IDisposable
             _gunTick = now; _gunRms = rms; _shots++;
         }
         Lag(at, shot: true);
-        try { Effect?.Invoke(SoundKind.Shot, strength); } catch (Exception ex) { Log.Error("soundfx effect", ex); }
+        try { Effect?.Invoke(SoundKind.Shot, strength, rms); } catch (Exception ex) { Log.Error("soundfx effect", ex); }
     }
 
     /// <summary>How long after its start (a sample of the loopback) a sound flashed, for the minute's log. Windows' own
@@ -667,7 +668,7 @@ public sealed class SoundFx : IDisposable
         }
         if (kind == SoundKind.Impact) Lag(at, shot: false);
         double strength = Math.Clamp((score - threshold) / (1 - threshold), 0, 1);
-        try { Effect?.Invoke(kind, strength); } catch (Exception ex) { Log.Error("soundfx effect", ex); }
+        try { Effect?.Invoke(kind, strength, 0); } catch (Exception ex) { Log.Error("soundfx effect", ex); }
     }
 
     public void Dispose()
