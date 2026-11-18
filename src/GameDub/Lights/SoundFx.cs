@@ -31,8 +31,10 @@ public enum SoundKind { Impact, Siren, Horn, Shot }
 ///   a cut alone in silence (the model averages over its second: "Silence"), a cut repeated over the second
 ///   (footsteps then read as gunfire).
 /// - Lasting sounds (sirens, horns, an engine) are looked at twice a second over the last second. A siren
-///   is shown only once two looks in a row hear it, and kept while it is heard within 2.5 s: in GTA 5 the model heard
-///   police sirens on and off, and the lights flickered.
+///   is shown at once when a look hears it at 0.5, or once two looks within 2 s hear it at 0.3, and kept while it is
+///   heard within 2.5 s: in GTA 5 the model heard police sirens on and off, and the lights flickered; two looks in a row
+///   missed a car alarm, which beeps on and off (GTA Online, 18.11: «Car alarm» up to 0.62, never twice in a row; police
+///   sirens came in at 0.64-0.77 one look before the light).
 /// A loudness detector without the model was tried for crashes (16.11) and dropped: it flashed on starts, menus and
 /// gear shifts in Wreckfest.
 /// A blast is checked by a second model, EfficientAT (mn10_as, JKU Linz, AudioSet, mAP 0.47 against YAMNet's 0.31),
@@ -54,6 +56,10 @@ public enum SoundKind { Impact, Siren, Horn, Shot }
 /// Whose sound it was (the player's crash or an AI car's, a blast nearby or far off) the model cannot say; for tuning,
 /// the log gives each shot, blast and crash check its loudness and side (+1 all left, -1 all right, 0 the middle,
 /// from the first two channels over its first 60 ms, 250 ms for a crash).
+/// Lag (owner, 18.11: «шоб не було такого відставання»): the loopback is read every 15 ms (NAudio's own read every 50 ms),
+/// on a thread of the highest priority; the next shot of a burst flashes on its onset, without waiting the 60 ms for the
+/// model; the model's thread is above normal, and the slow checks (EfficientAT, CLAP) run on threads of their own, so a
+/// blast check never holds up a shot. Each minute the log gives the lag from a sound's start to its flash.
 /// </summary>
 public sealed class SoundFx : IDisposable
 {
@@ -69,7 +75,7 @@ public sealed class SoundFx : IDisposable
     static readonly string[] DoorNames = { "Door", "Sliding door", "Slam", "Knock", "Tap", "Thump, thud", "Bang" };
     static readonly string[] GunNames = { "Gunshot, gunfire", "Machine gun", "Fusillade", "Artillery fire", "Cap gun" };
     static readonly string[] FootNames = { "Walk, footsteps", "Run", "Shuffle" };
-    const double GunScore = 0.2, ShotLoudness = 0.15, ImpactScore = 0.35, SirenScore = 0.3, SirenKeep = 0.25;
+    const double GunScore = 0.2, ShotLoudness = 0.15, ImpactScore = 0.35, SirenScore = 0.3, SirenSure = 0.5, SirenKeep = 0.25;
     // with the blast check: YAMNet proposes at 0.2, EfficientAT confirms at 0.1 (its scores run lower)
     const double ImpactProposal = 0.2, CheckScore = 0.1;
     const int CheckRate = 32000, CheckWindow = CheckRate, CheckPadded = CheckRate * 10;
@@ -88,8 +94,9 @@ public sealed class SoundFx : IDisposable
         "Engine", "Light engine (high frequency)", "Medium engine (mid frequency)", "Heavy engine (low frequency)", "Idling",
         "Accelerating, revving, vroom", "Tire squeal", "Skidding" };
 
-    /// <summary>Kind and strength of a detected effect: 0 just over its threshold, 1 as sure as the model gets.</summary>
-    public event Action<SoundKind, double>? Effect;
+    /// <summary>Kind and strength of a detected effect (0 just over its threshold, 1 as sure as the model gets), and for a
+    /// shot its loudness (the onset's RMS; 0 for the rest).</summary>
+    public event Action<SoundKind, double, double>? Effect;
 
     readonly InferenceSession _model;
     readonly string _input, _output;
@@ -98,7 +105,7 @@ public sealed class SoundFx : IDisposable
     readonly object _gate = new();
     int _write;
     long _samples, _classified;
-    WasapiLoopbackCapture? _capture;
+    WasapiCapture? _capture;
     string _deviceId = "";
     readonly Timer _hop;
     int _busy;
@@ -115,13 +122,18 @@ public sealed class SoundFx : IDisposable
     readonly Queue<Cut> _cuts = new();
     readonly SemaphoreSlim _cutReady = new(0);
     readonly Thread _judge;
+    readonly Worker? _checker, _crasher;                         // the blast check and the crash check, each on its own thread
+    readonly List<(double rms, long at)> _fastShots = new();     // next shots of a burst, flashed as soon as they start
+    readonly object _fireGate = new();
+    double _lagShot, _lagShotMax, _lagHit, _lagHitMax; int _lagShots, _lagHits;   // a sound's start to its flash, over a minute
+    [ThreadStatic] static bool _raised;
     volatile bool _stop;
     readonly object _shotGate = new();
     long _gunTick; double _gunRms, _loudestShot = 0.05;          // the last shot named, and the loudest shot lately
     // sudden sounds over a minute, for the log
     int _cutsMade, _judged, _late, _fast, _shots, _impacts; double _clipGun, _clipImpact, _judgeMs;
     readonly Dictionary<string, int> _clipTops = new();
-    long _lastEffectTick, _sirenOnUntil, _shotLogTick; int _shotsSinceLog; bool _sirenLookPrev;
+    long _lastEffectTick, _sirenOnUntil, _shotLogTick; int _shotsSinceLog; long _sirenHitTick, _sirenLogTick;
     readonly long[] _lastHeard = new long[Enum.GetValues<SoundKind>().Length];
     // what was heard, for the log: strongest effect scores and the loudest top class over a minute
     double _sumImpact, _sumGun, _sumSiren, _sumHorn; string _top = ""; double _topScore; int _hops; long _statTick;
@@ -155,10 +167,7 @@ public sealed class SoundFx : IDisposable
     readonly string[] _prompts = Array.Empty<string>();
     readonly bool _hear32;                                       // a 32 kHz copy for EfficientAT or CLAP
     readonly List<(long at, long block, double rms)> _crashWait = new();   // onsets waiting for their 250 ms after
-    readonly Queue<(float[] cut, double rms, double side, long tick)> _crashCuts = new();
-    readonly SemaphoreSlim _crashReady = new(0);
-    readonly Thread? _crashJudge;
-    int _crashChecks, _crashes, _crashLate; double _crashMs, _crashMax;
+    int _crashChecks, _crashes; double _crashMs, _crashMax;
 
     public SoundFx()
     {
@@ -213,13 +222,11 @@ public sealed class SoundFx : IDisposable
         }
         _hear32 = _check != null || _clap != null;
         _hop = new Timer(_ => Classify(), null, HopMs, HopMs);
-        _judge = new Thread(JudgeLoop) { IsBackground = true, Name = "soundfx judge" };
+        // the model's ~10 ms a sound before the game's own work: a flash is late by what it waits
+        _judge = new Thread(JudgeLoop) { IsBackground = true, Name = "soundfx judge", Priority = ThreadPriority.AboveNormal };
         _judge.Start();
-        if (_clap != null)
-        {
-            _crashJudge = new Thread(CrashLoop) { IsBackground = true, Name = "soundfx crash" };
-            _crashJudge.Start();
-        }
+        if (_check != null) _checker = new Worker("soundfx blast check", StaleMs);
+        if (_clap != null) _crasher = new Worker("soundfx crash", CrashStaleMs);
     }
 
     /// <summary>Opens the loopback of the current default output; call again from time to time to follow device changes.</summary>
@@ -233,12 +240,12 @@ public sealed class SoundFx : IDisposable
             if (dev.ID == _deviceId && _capture != null) return;
             StopCapture();
             _deviceId = dev.ID;
-            var cap = new WasapiLoopbackCapture(dev);
+            var cap = new Loopback(dev);
             cap.DataAvailable += (_, e) => Feed(e.Buffer, e.BytesRecorded, cap.WaveFormat);
             cap.RecordingStopped += (_, e) => { if (e.Exception != null) { Log.Error("soundfx capture", e.Exception); _deviceId = ""; } };
             cap.StartRecording();
             _capture = cap;
-            Log.Write($"soundfx: listening to {dev.FriendlyName} ({cap.WaveFormat.SampleRate} Hz, {cap.WaveFormat.Channels} ch)");
+            Log.Write($"soundfx: listening to {dev.FriendlyName} ({cap.WaveFormat.SampleRate} Hz, {cap.WaveFormat.Channels} ch, read every {Loopback.BufferMs / 2} ms)");
         }
         catch (Exception ex) { Log.Error("soundfx device", ex); _deviceId = ""; }
     }
@@ -258,6 +265,7 @@ public sealed class SoundFx : IDisposable
     {
         if (fmt.Encoding != WaveFormatEncoding.IeeeFloat && fmt.Encoding != WaveFormatEncoding.Extensible) return;
         if (fmt.BitsPerSample != 32) return;
+        if (!_raised) { _raised = true; try { Thread.CurrentThread.Priority = ThreadPriority.Highest; } catch { } } // a few ms of work every 15 ms
         int ch = fmt.Channels, frames = bytes / 4 / ch;
         var lr = new List<(float l, float r)>(frames);
         var mono = Mono(buf, frames, ch, fmt.SampleRate, Rate, ref _phase, lr);
@@ -314,7 +322,8 @@ public sealed class SoundFx : IDisposable
     void Push(List<float> mono, List<float>? mono32, List<(float l, float r)> lr)
     {
         List<(float[] around, float[]? around32, double rms, double side, long at, long block)>? ready = null;
-        List<(float[] cut, double rms, double side)>? crashCuts = null;
+        List<(float[] cut, double rms, double side, long at)>? crashCuts = null;
+        List<(double rms, long at)>? fast = null;
         lock (_gate)
         {
             if (mono32 != null)
@@ -346,21 +355,14 @@ public sealed class SoundFx : IDisposable
                 var (at, block, rms) = _crashWait[0];
                 _crashWait.RemoveAt(0);
                 if (Paused || mono32 == null || _samples - at > CrashPostSamples + Rate / 10) continue; // came in late: skip
-                (crashCuts ??= new()).Add((Cut32(), rms, Side(block)));
+                (crashCuts ??= new()).Add((Cut32(), rms, Side(block), at));
             }
+            if (_fastShots.Count > 0) { fast = new(_fastShots); _fastShots.Clear(); }
         }
+        if (fast != null) foreach (var (rms, at) in fast) { _fast++; Shoot(rms, Environment.TickCount64, at, next: true); }
         if (ready != null) foreach (var (around, around32, rms, side, at, block) in ready) Hand(around, around32, rms, side, at, block);
-        if (crashCuts != null)
-        {
-            long now = Environment.TickCount64;
-            lock (_crashCuts)
-                foreach (var (cut, rms, side) in crashCuts)
-                {
-                    if (_crashCuts.Count >= 2) { _crashCuts.Dequeue(); _crashLate++; }
-                    _crashCuts.Enqueue((cut, rms, side, now));
-                    _crashReady.Release();
-                }
-        }
+        if (crashCuts != null && _crasher != null)
+            foreach (var (cut, rms, side, at) in crashCuts) _crasher.Add(() => CrashCheck(cut, rms, side, at));
     }
 
     /// <summary>The last second at 32 kHz (under _gate).</summary>
@@ -388,6 +390,9 @@ public sealed class SoundFx : IDisposable
         // most shots of a burst in GTA 5, 16.11)
         if (rms < 0.01 || rms < 1.6 * before || _samples - _lastOnset < OnsetGap) return;
         _lastOnset = _samples;
+        // within 300 ms of a shot, a sound at least 40 % as loud is the next shot of the burst: it flashes now, without the model
+        bool next; lock (_shotGate) next = !Paused && Environment.TickCount64 - _gunTick < 300 && rms >= 0.4 * _gunRms;
+        if (next) { if (_fastShots.Count < 8) _fastShots.Add((rms, _samples - Block)); return; }
         if (_onsets.Count < 8) _onsets.Add((_samples - Block, rms, _blockNo - 1));   // from the start of the block that jumped
     }
 
@@ -399,24 +404,17 @@ public sealed class SoundFx : IDisposable
         return l + r > 1e-9 ? (l - r) / (l + r) : 0;
     }
 
-    /// <summary>A cut for the model. Within 300 ms of a shot, a sound at least 40 % as loud as it is the next shot of the
-    /// burst and flashes at once, without waiting for the model, so a burst flashes shot by shot.</summary>
+    /// <summary>A cut for the model. (The next shots of a burst never get here: they flash on their onset, see Gate.)</summary>
     void Hand(float[] around, float[]? around32, double rms, double side, long at, long block)
     {
         long now = Environment.TickCount64;
-        bool fast = false;
         lock (_cuts)
         {
             _cutsMade++;
-            lock (_shotGate) fast = now - _gunTick < 300 && rms >= 0.4 * _gunRms;
-            if (!fast)
-            {
-                if (_cuts.Count >= 4) { _cuts.Dequeue(); _late++; }
-                _cuts.Enqueue(new Cut(around, around32, rms, side, at, block, now));
-            }
+            if (_cuts.Count >= 4) { _cuts.Dequeue(); _late++; }
+            _cuts.Enqueue(new Cut(around, around32, rms, side, at, block, now));
         }
-        if (fast) { _fast++; Shoot(rms, now); }
-        else _cutReady.Release();
+        _cutReady.Release();
     }
 
     void JudgeLoop()
@@ -455,18 +453,6 @@ public sealed class SoundFx : IDisposable
         bool checking = _check != null && around32 != null;
         double impactScore = checking ? ImpactProposal : ImpactScore;
         bool blast = !shot && impact >= impactScore && impact > gun && impact > foot && impact > door;
-        double check = -1;
-        if (blast && checking)
-        {
-            long c0 = Stopwatch.GetTimestamp();
-            check = Check(around32!);
-            blast = check >= CheckScore;
-            lock (_clipTops)
-            {
-                _checks++; _checkMs += Stopwatch.GetElapsedTime(c0).TotalMilliseconds;
-                if (!blast) _vetoed++;
-            }
-        }
         lock (_clipTops)
         {
             _judged++; _judgeMs += Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
@@ -479,45 +465,43 @@ public sealed class SoundFx : IDisposable
             // a burst is many shots: the log names the first of each and how many followed
             if (now - _shotLogTick > 2000) { Log.Write($"soundfx: Shot («{_names[top]}», {_shotsSinceLog} more before{heardAs})"); _shotLogTick = now; _shotsSinceLog = 0; }
             else _shotsSinceLog++;
-            Shoot(rms, now);
+            Shoot(rms, now, cut.At);
+            return;
         }
-        else if (blast)
+        // a hit in a race may be a crash: CLAP hears it too (a blast the check turns down may still be one)
+        if (!blast || checking)
+            if (_clap != null && EngineHeardWithin(CrashEngineMs) && h.Max(_hint) >= HintScore)
+                lock (_gate) if (_crashWait.Count < 4) _crashWait.Add((cut.At, cut.Block, rms));
+        if (!blast) return;
+        if (!checking) { lock (_clipTops) _impacts++; Fire(SoundKind.Impact, impact, impactScore, now, _names[top], heardAs, cut.At); return; }
+        string topName = _names[top]; long at = cut.At; var second = around32!;
+        _checker!.Add(() =>
         {
-            _impacts++;
-            Fire(SoundKind.Impact, impact, impactScore, now, _names[top], (check >= 0 ? $", check {check:F2}" : "") + heardAs);
-        }
-        else if (_clap != null && EngineHeardWithin(CrashEngineMs) && h.Max(_hint) >= HintScore)
-            lock (_gate) if (_crashWait.Count < 4) _crashWait.Add((cut.At, cut.Block, rms));
+            long c0 = Stopwatch.GetTimestamp();
+            double check = Check(second);
+            bool real = check >= CheckScore;
+            lock (_clipTops)
+            {
+                _checks++; _checkMs += Stopwatch.GetElapsedTime(c0).TotalMilliseconds;
+                if (real) _impacts++; else _vetoed++;
+            }
+            if (real) Fire(SoundKind.Impact, impact, impactScore, Environment.TickCount64, topName, $", check {check:F2}" + heardAs, at);
+        });
     }
 
-    void CrashLoop()
+    /// <summary>CLAP on the second that ends 250 ms after a hit in a race (the crash thread).</summary>
+    void CrashCheck(float[] cut, double rms, double side, long at)
     {
-        while (!_stop)
+        long t0 = Stopwatch.GetTimestamp();
+        var (crash, top) = Crash(cut);
+        lock (_clipTops)
         {
-            _crashReady.Wait(1000);
-            (float[] cut, double rms, double side, long tick) c;
-            lock (_crashCuts)
-            {
-                if (_crashCuts.Count == 0) continue;
-                c = _crashCuts.Dequeue();
-            }
-            if (_stop) return;
-            if (Environment.TickCount64 - c.tick > CrashStaleMs) { lock (_crashCuts) _crashLate++; continue; }
-            try
-            {
-                long t0 = Stopwatch.GetTimestamp();
-                var (crash, top) = Crash(c.cut);
-                lock (_clipTops)
-                {
-                    _crashChecks++; _crashMs += Stopwatch.GetElapsedTime(t0).TotalMilliseconds; _crashMax = Math.Max(_crashMax, crash);
-                    if (crash >= CrashScore) _crashes++;
-                }
-                string heardAs = $", loud {c.rms:F2}, side {c.side:+0.00;-0.00;0.00}";
-                if (crash >= CrashScore) Fire(SoundKind.Impact, crash, CrashScore, Environment.TickCount64, $"crash, {_prompts[top]}", heardAs);
-                else if (crash >= CrashLogScore) Log.Write($"soundfx: crash check {crash:F2} («{_prompts[top]}»), no flash{heardAs}");
-            }
-            catch (Exception ex) { Log.Error("soundfx crash", ex); }
+            _crashChecks++; _crashMs += Stopwatch.GetElapsedTime(t0).TotalMilliseconds; _crashMax = Math.Max(_crashMax, crash);
+            if (crash >= CrashScore) _crashes++;
         }
+        string heardAs = $", loud {rms:F2}, side {side:+0.00;-0.00;0.00}";
+        if (crash >= CrashScore) Fire(SoundKind.Impact, crash, CrashScore, Environment.TickCount64, $"crash, {_prompts[top]}", heardAs, at);
+        else if (crash >= CrashLogScore) Log.Write($"soundfx: crash check {crash:F2} («{_prompts[top]}»), no flash{heardAs}");
     }
 
     /// <summary>CLAP over one second at 32 kHz: made 48 kHz (linear) and repeated to its 10 s, as its processor does
@@ -575,16 +559,29 @@ public sealed class SoundFx : IDisposable
     }
 
     /// <summary>A shot's flash, as bright as the shot is loud against the loudest shot lately: the player's own about 1.</summary>
-    void Shoot(double rms, long now)
+    void Shoot(double rms, long now, long at, bool next = false)
     {
         double strength;
         lock (_shotGate)
         {
             _loudestShot = Math.Max(rms, _loudestShot);
             strength = Math.Clamp(rms / _loudestShot, 0, 1);
-            _gunTick = now; _gunRms = rms; _shots++;
+            // a next shot keeps the burst's loudness: else 40 % of 40 % of... let echoes and others' fire carry a burst on
+            _gunTick = now; _gunRms = next ? Math.Max(_gunRms, rms) : rms; _shots++;
         }
-        try { Effect?.Invoke(SoundKind.Shot, strength); } catch (Exception ex) { Log.Error("soundfx effect", ex); }
+        Lag(at, shot: true);
+        try { Effect?.Invoke(SoundKind.Shot, strength, rms); } catch (Exception ex) { Log.Error("soundfx effect", ex); }
+    }
+
+    /// <summary>How long after its start (a sample of the loopback) a sound flashed, for the minute's log. Windows' own
+    /// output buffer and the light's frame come on top.</summary>
+    void Lag(long at, bool shot)
+    {
+        if (at < 0) return;
+        double ms = (Interlocked.Read(ref _samples) - at) * 1000.0 / Rate;
+        lock (_clipTops)
+            if (shot) { _lagShot += ms; _lagShots++; _lagShotMax = Math.Max(_lagShotMax, ms); }
+            else { _lagHit += ms; _lagHits++; _lagHitMax = Math.Max(_lagHitMax, ms); }
     }
 
     void Classify()
@@ -611,9 +608,20 @@ public sealed class SoundFx : IDisposable
             Stats(scores, frames, impact, gun, siren, horn, now);
             // Sudden sounds are judged one by one as they come (Judge); a look would show them up to a second late.
             // a siren and a horn fire every look while they last: their lights follow the sound
-            // a siren: two looks in a row to start, then on while heard within 2.5 s, so it neither flickers nor starts on a blip
-            if (siren >= SirenScore && _sirenLookPrev) _sirenOnUntil = now + 2500;
-            _sirenLookPrev = siren >= SirenScore;
+            // a siren: two looks within 1.5 s to start (an alarm beeps on and off), then on while heard within 2.5 s, so it
+            // neither flickers nor starts on a blip
+            if (siren >= SirenScore)
+            {
+                if (siren >= SirenSure || now - _sirenHitTick <= 2000) _sirenOnUntil = now + 2500;
+                else if (now - _sirenLogTick > 5000)
+                {
+                    int best = _siren[0]; double bestScore = 0;
+                    for (int f = 0; f < frames; f++) foreach (var i in _siren) if (scores[f, i] > bestScore) { bestScore = scores[f, i]; best = i; }
+                    Log.Write($"soundfx: siren heard once, {siren:F2} («{_names[best]}»), waiting for a second look");
+                    _sirenLogTick = now;
+                }
+                _sirenHitTick = now;
+            }
             if (siren >= SirenKeep && now < _sirenOnUntil) _sirenOnUntil = now + 2500;
             if (now < _sirenOnUntil) Fire(SoundKind.Siren, Math.Max(siren, SirenScore), SirenScore, now);
             if (horn > 0.4) Fire(SoundKind.Horn, horn, 0.4, now);
@@ -641,31 +649,40 @@ public sealed class SoundFx : IDisposable
                     $"{_shots} shots, {_impacts} blasts" + (_checks > 0 ? $" ({_checks} checked, {_checkMs / _checks:F0} ms each, {_vetoed} not blasts)" : "") +
                     $"; max gunfire {_clipGun:F2} impact {_clipImpact:F2}; mostly " +
                     string.Join(", ", _clipTops.OrderByDescending(t => t.Value).Take(4).Select(t => $"«{t.Key}» {t.Value}")));
-            if (_crashChecks > 0 || _crashLate > 0)
-                Log.Write($"soundfx: {_crashChecks} crash checks ({(_crashChecks > 0 ? _crashMs / _crashChecks : 0):F0} ms each), {_crashLate} late, " +
+            int crashLate = _crasher?.TakeLate() ?? 0, checkLate = _checker?.TakeLate() ?? 0;
+            if (_crashChecks > 0 || crashLate > 0)
+                Log.Write($"soundfx: {_crashChecks} crash checks ({(_crashChecks > 0 ? _crashMs / _crashChecks : 0):F0} ms each), {crashLate} late, " +
                     $"{_crashes} crashes; max crash {_crashMax:F2}");
+            if (_lagShots + _lagHits > 0 || checkLate > 0)
+                Log.Write($"soundfx: lag from a sound's start to its flash: shots {(_lagShots > 0 ? _lagShot / _lagShots : 0):F0} ms " +
+                    $"(max {_lagShotMax:F0}), blasts and crashes {(_lagHits > 0 ? _lagHit / _lagHits : 0):F0} ms (max {_lagHitMax:F0}); {checkLate} blast checks late");
+            _lagShot = _lagShotMax = _lagHit = _lagHitMax = 0; _lagShots = _lagHits = 0;
             _cutsMade = _judged = _late = _fast = _shots = _impacts = _checks = _vetoed = 0; _clipGun = _clipImpact = _judgeMs = _checkMs = 0; _clipTops.Clear();
-            _crashChecks = _crashes = _crashLate = 0; _crashMs = _crashMax = 0;
+            _crashChecks = _crashes = 0; _crashMs = _crashMax = 0;
         }
         _statTick = now; _hops = 0; _sumImpact = _sumGun = _sumSiren = _sumHorn = _topScore = 0; _top = "";
     }
 
     /// <summary>The strength is how far the score is over its threshold, 0..1: a faint sound gives a short dim light,
     /// a loud one a long bright one. The log keeps the model's own score, for tuning.</summary>
-    void Fire(SoundKind kind, double score, double threshold, long now, string? heard = null, string? note = null)
+    void Fire(SoundKind kind, double score, double threshold, long now, string? heard = null, string? note = null, long at = -1)
     {
-        if (kind == SoundKind.Impact)
+        lock (_fireGate)    // the judge, the blast check and the crash check may fire at once
         {
-            if (now - _lastEffectTick < 700) return; // one flash per burst of explosions, not a strobe
-            _lastEffectTick = now;
+            if (kind == SoundKind.Impact)
+            {
+                if (now - _lastEffectTick < 700) return; // one flash per burst of explosions, not a strobe
+                _lastEffectTick = now;
+            }
+            // a siren or a horn comes every look while it lasts: log only its start
+            bool ongoing = kind is SoundKind.Siren or SoundKind.Horn;
+            ref long last = ref _lastHeard[(int)kind];
+            if (!ongoing || now - last > 2000) Log.Write($"soundfx: {kind} {score:F2}{(heard != null ? $" («{heard}»)" : "")}{note}");
+            last = now;
         }
-        // a siren or a horn comes every look while it lasts: log only its start
-        bool ongoing = kind is SoundKind.Siren or SoundKind.Horn;
-        ref long last = ref _lastHeard[(int)kind];
-        if (!ongoing || now - last > 2000) Log.Write($"soundfx: {kind} {score:F2}{(heard != null ? $" («{heard}»)" : "")}{note}");
-        last = now;
+        if (kind == SoundKind.Impact) Lag(at, shot: false);
         double strength = Math.Clamp((score - threshold) / (1 - threshold), 0, 1);
-        try { Effect?.Invoke(kind, strength); } catch (Exception ex) { Log.Error("soundfx effect", ex); }
+        try { Effect?.Invoke(kind, strength, 0); } catch (Exception ex) { Log.Error("soundfx effect", ex); }
     }
 
     public void Dispose()
@@ -675,10 +692,71 @@ public sealed class SoundFx : IDisposable
         _stop = true;
         _cutReady.Release();
         _judge.Join(2000);
-        _crashReady.Release();
-        _crashJudge?.Join(2000);
+        _checker?.Dispose();
+        _crasher?.Dispose();
         _model.Dispose();
         _check?.Dispose();
         _clap?.Dispose();
+    }
+
+    /// <summary>The loopback of an output, read every 15 ms: NAudio's WasapiLoopbackCapture keeps a 100 ms buffer and
+    /// reads it every 50 ms, so a sound reached the model up to 50 ms late.</summary>
+    sealed class Loopback : WasapiCapture
+    {
+        public const int BufferMs = 30;
+        public Loopback(MMDevice device) : base(device, false, BufferMs) { }
+        protected override AudioClientStreamFlags GetAudioClientStreamFlags() => AudioClientStreamFlags.Loopback | base.GetAudioClientStreamFlags();
+    }
+
+    /// <summary>A slow check on a thread of its own, so the judge never waits for it: at most two wait, the older gives
+    /// way, and one that waited too long is dropped (a late flash is worse than none).</summary>
+    sealed class Worker : IDisposable
+    {
+        readonly Queue<(Action run, long tick)> _jobs = new();
+        readonly SemaphoreSlim _ready = new(0);
+        readonly Thread _thread;
+        readonly int _staleMs;
+        readonly string _name;
+        volatile bool _stop;
+        int _late;
+
+        public Worker(string name, int staleMs)
+        {
+            _name = name; _staleMs = staleMs;
+            _thread = new Thread(Loop) { IsBackground = true, Name = name };
+            _thread.Start();
+        }
+
+        public void Add(Action run)
+        {
+            lock (_jobs)
+            {
+                if (_jobs.Count >= 2) { _jobs.Dequeue(); _late++; }
+                _jobs.Enqueue((run, Environment.TickCount64));
+            }
+            _ready.Release();
+        }
+
+        public int TakeLate() { lock (_jobs) { int n = _late; _late = 0; return n; } }
+
+        void Loop()
+        {
+            while (!_stop)
+            {
+                _ready.Wait(1000);
+                (Action run, long tick) job;
+                lock (_jobs)
+                {
+                    if (_jobs.Count == 0) continue;
+                    job = _jobs.Dequeue();
+                    if (Environment.TickCount64 - job.tick > _staleMs) { _late++; continue; }
+                }
+                if (_stop) return;
+                try { job.run(); }
+                catch (Exception ex) { Log.Error(_name, ex); }
+            }
+        }
+
+        public void Dispose() { _stop = true; _ready.Release(); _thread.Join(2000); }
     }
 }

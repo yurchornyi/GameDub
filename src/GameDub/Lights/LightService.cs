@@ -38,12 +38,16 @@ public sealed class LightService : IDisposable
     const int FrameMs = 33, SirenPeriod = 800, ShiftPeriod = 500, ShiftGap = 180;
     const int HeardHold = 700; // a sound heard again within this keeps its light on: the model looks every 480 ms
     // a shot is the player's own when the right trigger was pulled within 0.6 s before it is shown (the game, the sound
-    // and the model take 0.1-0.25 s); a burst goes on while its shots come less than 0.6 s apart
-    const int FireMs = 600, BurstGapMs = 600;
+    // and the model take 0.1-0.25 s); a burst goes on while its shots come less than 1 s apart (the model misses some)
+    const int FireMs = 600, BurstGapMs = 1000;
+    const double MineLoudness = 0.4;   // with the aim held, the player's shot is at least this share of the loudest lately
+    // both triggers on the middle of Z: held together, or both let go. A shot at least 60 % as loud as the player's own gun
+    // (learned from his sure shots, forgotten by half in a minute) is his.
+    const double MyGunShare = 0.55;
     static readonly Pulse ChargePulse = new(150, 600, 900), ShiftBlink = new(20, 60, 80),
         ShotPulse = new(10, 30, 150); // one shot: a quick orange blink, so a burst reads as separate shots
     /// <summary>An impact by its strength 0..1: 0.4 s and dim for a touch, 1.6 s and bright for a heavy crash.</summary>
-    static Pulse ImpactPulse(double s) => new(60 + (int)(60 * s), 80 + (int)(520 * s), 260 + (int)(640 * s));
+    static Pulse ImpactPulse(double s) => new(25 + (int)(25 * s), 80 + (int)(520 * s), 260 + (int)(640 * s)); // a quick rise: a slow one read as lag
 
     /// <summary>Brightness 0..1 of a one-shot effect over time: smooth rise, hold, then a squared fall
     /// (LED light looks linear to the eye only on a curve; a straight fall seems to hang, then drop).</summary>
@@ -61,7 +65,12 @@ public sealed class LightService : IDisposable
     }
 
     readonly StickLights _lights = new();
-    readonly System.Threading.Timer _frame, _slow;
+    readonly System.Threading.Timer _slow;
+    // the frames: a thread of their own above normal, woken at once by a new effect (a timer of the thread pool waited up to
+    // a frame, longer while a game kept the processor busy)
+    readonly Thread _frame;
+    readonly AutoResetEvent _kick = new(false);
+    volatile bool _closing;
     readonly DisplayWatcher _display;
     AppSettings _s = new();
     SoundFx? _sound;
@@ -76,6 +85,7 @@ public sealed class LightService : IDisposable
     long _fxStart; int _fxMs; SoundKind? _fx; double _fxStrength;
     long _shotStart; double _shotStrength; // the last shot: its own short pulse, over an impact's longer one
     long _mineTick, _darkLogTick; int _shotsMine, _shotsDark; // the player's last own shot; shots over a minute, for the log
+    double _myGun; long _myGunTick;                           // the loudness of the player's own gun, from his sure shots
     // a siren or a horn heard in the game: lit from its start until its until, moved on while it is heard
     long _sirenStart, _sirenUntil, _hornStart, _hornUntil; double _hornStrength;
     // states
@@ -94,7 +104,12 @@ public sealed class LightService : IDisposable
     {
         _display = new DisplayWatcher();
         _accent = ReadAccent();
-        _frame = new System.Threading.Timer(_ => Frame(), null, 500, FrameMs);
+        _frame = new Thread(() =>
+        {
+            _kick.WaitOne(500);
+            while (!_closing) { Frame(); _kick.WaitOne(FrameMs); }
+        }) { IsBackground = true, Name = "lights frame", Priority = ThreadPriority.AboveNormal };
+        _frame.Start();
         _slow = new System.Threading.Timer(_ => Slow(), null, 1000, 1000);
         Log.Write("lights: service started");
     }
@@ -129,9 +144,10 @@ public sealed class LightService : IDisposable
     {
         if (_docked) return;
         lock (_gate) { _fx = SoundKind.Impact; _fxStrength = strength; _fxStart = Environment.TickCount64; _fxMs = ImpactPulse(strength).Total; }
+        _kick.Set();
     }
 
-    void OnSound(SoundKind kind, double strength)
+    void OnSound(SoundKind kind, double strength, double loud = 0)
     {
         if (_docked) return;                  // on a TV: the sticks are out of sight and the pad in hand is another one
         AppSettings s; lock (_gate) s = _s;
@@ -144,45 +160,66 @@ public sealed class LightService : IDisposable
             switch (kind)
             {
                 case SoundKind.Shot:
-                    if (!MyShot(now)) return;
+                    if (!MyShot(now, strength, loud)) return;
                     _shotStart = now; _shotStrength = strength;
-                    return;
+                    break;
                 case SoundKind.Siren:
                     // police lights while the siren wails, out right after it
                     if (now >= _sirenUntil) _sirenStart = now;
                     _sirenUntil = now + Math.Max(HeardHold, SirenPeriod);
-                    return;
+                    break;
                 case SoundKind.Horn:
                     // yellow while the horn sounds: a beep is short, a long honk stays on, as bright as it is loud
                     if (now >= _hornUntil) _hornStart = now;
                     _hornUntil = now + HeardHold; _hornStrength = strength;
-                    return;
+                    break;
             }
+            if (kind != SoundKind.Impact) { _kick.Set(); return; }
             _fx = kind; _fxStrength = strength; _fxStart = now;
             _fxMs = ImpactPulse(strength).Total;
         }
+        _kick.Set();
     }
 
     /// <summary>
     /// A shot is shown only when it is the player's own: the right trigger, fire in shooters, was pulled within 0.6 s
     /// (others' shots, NPCs' and enemies', stay dark). The Xbox-style pad shows both triggers on one axis, so fire with
     /// the aim held (the left trigger) is only a fall of that axis, like letting the aim go: a shot right after a fall
-    /// counts, and while the axis stays where it fell, the next shots count as long as they come less than 0.6 s apart
+    /// counts, and while the axis stays below the aim alone, the next shots count as long as they come less than 1 s apart
     /// (an automatic burst with both held). No pad to read (another kind of pad, or none has spoken yet): every shot, as
-    /// before. In a car the right trigger is the gas, so there all shots show. Under _gate.
+    /// before. In a car the right trigger is the gas, so there all shots show.
+    /// Letting the aim go looks like that fall too, and the police shots right after it flashed (GTA Online, 18.11: «коли я
+    /// постріляв, тоді блимає»), so with the aim in play a shot counts only when it is as loud as the player's own gun:
+    /// at least 60 % of it (learned from his sure shots; the police's were up to half of it). A burst no longer carries
+    /// itself on: the police's fire kept the lights going after he stopped («я постріляв і перестав, воно далі показувало»,
+    /// 18.11). Before his gun is known: 40 % of the loudest shot lately, and a burst under 1 s apart. Under _gate.
     /// </summary>
-    bool MyShot(long now)
+    bool MyShot(long now, double strength, double loud)
     {
         var fire = _pad.RightTrigger(now, FireMs);
+        bool strong = strength >= MineLoudness;
+        double myGun = _myGun * Math.Pow(0.5, (now - _myGunTick) / 60_000.0);
+        // with both triggers held together Z stays in the middle (GTA Online, 18.11: most of the player's long bursts were
+        // dark this way, «Held», as loud as the loudest): his gun's own loudness tells
+        bool asMyGun = myGun > 0 && loud >= MyGunShare * myGun;
         bool mine = fire switch
         {
-            PadInput.Fire.Unknown or PadInput.Fire.Pulled or PadInput.Fire.Fell => true,
-            PadInput.Fire.Held => now - _mineTick < BurstGapMs,
+            PadInput.Fire.Unknown or PadInput.Fire.Pulled => true,
+            PadInput.Fire.Fell => myGun > 0 ? asMyGun : strong,
+            PadInput.Fire.Held => myGun > 0 ? asMyGun : strong && now - _mineTick < BurstGapMs,
             _ => false,
         };
-        if (mine) { _mineTick = now; _shotsMine++; return true; }
+        string how = $"trigger {fire}, Z {_pad.Z:F2}, strength {strength:F2}, loud {loud:F3}, own gun {myGun:F3}";
+        if (mine)
+        {
+            // an average of his sure shots: the loudest one alone (a near blast read as a shot) set the bar too high (18.11)
+            if (fire is PadInput.Fire.Pulled or PadInput.Fire.Fell && strong) { _myGun = myGun > 0 ? myGun + 0.3 * (loud - myGun) : loud; _myGunTick = now; }
+            else if (myGun > 0 && loud >= MyGunShare * myGun) _myGunTick = now; // still his gun: keep it in mind
+            if (now - _mineTick > 2000) Log.Write($"lights: the player's shot ({how})");
+            _mineTick = now; _shotsMine++; return true;
+        }
         _shotsDark++;
-        if (now - _darkLogTick > 2000) { _darkLogTick = now; Log.Write($"lights: a shot left dark, not the player's (trigger {fire})"); }
+        if (now - _darkLogTick > 2000) { _darkLogTick = now; Log.Write($"lights: a shot left dark, not the player's ({how})"); }
         return false;
     }
 
@@ -426,7 +463,8 @@ public sealed class LightService : IDisposable
 
     public void Dispose()
     {
-        _frame.Dispose(); _slow.Dispose();
+        _closing = true; _kick.Set(); _frame.Join(1000);
+        _slow.Dispose();
         _sound?.Dispose();
         _telemetry?.Dispose();
         _pad.Dispose();

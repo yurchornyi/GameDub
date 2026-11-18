@@ -80,7 +80,7 @@ public static class Program
                 int secs = a.Length > 1 ? int.Parse(a[1]) : 60;
                 using var fx = new Lights.SoundFx();
                 var t0 = DateTime.Now;
-                fx.Effect += (k, st) => { lock (o) o.AppendLine($"{(DateTime.Now - t0).TotalSeconds,6:F1} s  {k}  {st:F2}"); };
+                fx.Effect += (k, st, _) => { lock (o) o.AppendLine($"{(DateTime.Now - t0).TotalSeconds,6:F1} s  {k}  {st:F2}"); };
                 fx.FollowDefaultDevice();
                 Thread.Sleep(secs * 1000);
                 break;
@@ -90,7 +90,7 @@ public static class Program
                 // --test soundfx-files <file>...: play sound files into the effects in real time, no speakers
                 using var fx = new Lights.SoundFx();
                 string cur = ""; var t0 = DateTime.Now;
-                fx.Effect += (k, st) => { lock (o) o.AppendLine($"{cur}\t{(DateTime.Now - t0).TotalSeconds:F2}\t{k}\t{st:F2}"); };
+                fx.Effect += (k, st, _) => { lock (o) o.AppendLine($"{cur}\t{(DateTime.Now - t0).TotalSeconds:F2}\t{k}\t{st:F2}"); };
                 foreach (var f in a.Skip(1))
                 {
                     lock (o) { cur = Path.GetFileName(f); t0 = DateTime.Now; }

@@ -59,8 +59,13 @@ sealed class PadInput : IDisposable
     // the right trigger, from the same Z: a pull seen (Z under the middle), a fall from the left side, the level after it
     volatile bool _known, _held;
     volatile float _z;
-    long _rightTick, _fallTick;
-    double _zHigh, _fallLevel;                              // the pad thread's only
+    long _rightTick, _fallTick, _zMoveTick;
+    double _zPrev;
+    const int HeldMs = 5000;
+    // Z under the middle means the right trigger is pressed more than the left: a trigger at rest reads exactly 0, so even
+    // a little counts. Both held in GTA read -0.02..-0.03 (the aim stops short of full), which -0.15 missed (18.11).
+    const double RightPulled = -0.015;                                // a magazine in GTA is ~3 s of automatic fire
+    double _zHigh, _aim;                                    // the pad thread's only; _aim: Z with the left one alone
     byte[] _report = Array.Empty<byte>();
     readonly ushort[] _pressed = new ushort[32];
 
@@ -85,16 +90,19 @@ sealed class PadInput : IDisposable
     public long ActiveTick => Interlocked.Read(ref _activeTick);
 
     /// <summary>What the right trigger did lately: Pulled (seen under the middle of Z), Fell (Z fell from the left side:
-    /// fire with the aim held, or the aim let go), Held (Z still where it fell: both may be held, or none), Off, or
-    /// Unknown (not listening, or no Xbox-style pad has spoken since).</summary>
+    /// fire with the aim held, or the aim let go), Held (Z still where it fell: both may be held, or none; for 5 s after Z
+    /// last moved, as both let go leave it there too), Off, or Unknown (not listening, or no Xbox-style pad has spoken since).</summary>
     public enum Fire { Unknown, Off, Pulled, Fell, Held }
+
+    /// <summary>The last Z, for the log: +1 the left trigger alone, -1 the right one alone.</summary>
+    public double Z => _z;
 
     public Fire RightTrigger(long now, int withinMs)
     {
         if (!_known) return Fire.Unknown;
-        if (_z < -0.15 || now - Interlocked.Read(ref _rightTick) < withinMs) return Fire.Pulled;
+        if (_z < RightPulled || now - Interlocked.Read(ref _rightTick) < withinMs) return Fire.Pulled;
         if (now - Interlocked.Read(ref _fallTick) < withinMs) return Fire.Fell;
-        return _held ? Fire.Held : Fire.Off;
+        return _held && now - Interlocked.Read(ref _zMoveTick) < HeldMs ? Fire.Held : Fire.Off;
     }
 
     /// <summary>Listen or not; cheap to call every second.</summary>
@@ -114,7 +122,7 @@ sealed class PadInput : IDisposable
         };
         if (!RegisterRawInputDevices(d, (uint)d.Length, (uint)Marshal.SizeOf<RawInputDevice>()))
             Log.Write($"pad: raw input {(on ? "on" : "off")} failed, error {Marshal.GetLastWin32Error()}");
-        if (!on) { _left = 0; _z = 0; _known = _held = false; _zHigh = 0; }
+        if (!on) { _left = 0; _z = 0; _known = _held = false; _zHigh = _aim = 0; }
     }
 
     void OnInput(IntPtr handle)
@@ -154,18 +162,28 @@ sealed class PadInput : IDisposable
         if (active) Interlocked.Exchange(ref _activeTick, Environment.TickCount64);
     }
 
-    /// <summary>Both triggers from Z (+1 the left one, -1 the right one). A fall of 0.35 from 0.4 or more is the right
-    /// trigger pulled with the left one held, or the left one let go; while Z stays within 0.25 of where it fell, both
-    /// may still be held.</summary>
+    /// <summary>Both triggers from Z (+1 the left one, -1 the right one). A fall of 0.08 from 0.4 or more is the right
+    /// trigger pulled with the left one held, or the left one let go; until Z comes back near where the left one alone
+    /// had it, both may still be held. A light pull fires in GTA: the player's shots came with Z at 0.8 under a full aim
+    /// (18.11, a fall of 0.35 missed them, and 0.15 still missed pulls to 0.86-0.88 under an aim at 0.97).</summary>
     void Triggers(double z)
     {
         long now = Environment.TickCount64;
         _left = (float)Math.Max(0, z);
         _z = (float)z; _known = true;
-        if (z < -0.15) Interlocked.Exchange(ref _rightTick, now);
+        if (Math.Abs(z - _zPrev) > 0.02) Interlocked.Exchange(ref _zMoveTick, now);
+        _zPrev = z;
+        if (z < RightPulled) Interlocked.Exchange(ref _rightTick, now);
         if (z > _zHigh) _zHigh = z;
-        else if (_zHigh >= 0.4 && z <= _zHigh - 0.35) { Interlocked.Exchange(ref _fallTick, now); _fallLevel = z; _held = true; _zHigh = z; }
-        if (_held && Math.Abs(z - _fallLevel) > 0.25) _held = false;
+        else if (_zHigh >= 0.4 && z <= _zHigh - 0.08)
+        {
+            Interlocked.Exchange(ref _fallTick, now);
+            _aim = _held ? Math.Max(_aim, _zHigh) : _zHigh;
+            _held = true; _zHigh = z;
+        }
+        // back up near the aim alone: the right trigger let go. Fingers move both triggers a little during a long burst
+        // (a band of 0.25 around the fall lost long bursts in GTA Online, 18.11), so anywhere below that counts as held.
+        if (_held && z > _aim - 0.05) _held = false;
     }
 
     Pad? Find(IntPtr device)
