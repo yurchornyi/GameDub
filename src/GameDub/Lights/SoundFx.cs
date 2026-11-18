@@ -471,7 +471,7 @@ public sealed class SoundFx : IDisposable
                 lock (_gate) if (_crashWait.Count < 4) _crashWait.Add((cut.At, cut.Block, rms));
         if (!blast) return;
         if (!checking) { lock (_clipTops) _impacts++; Fire(SoundKind.Impact, impact, impactScore, now, _names[top], heardAs, cut.At); return; }
-        string name = _names[top]; long at = cut.At; var second = around32!;
+        string topName = _names[top]; long at = cut.At; var second = around32!;
         _checker!.Add(() =>
         {
             long c0 = Stopwatch.GetTimestamp();
@@ -482,7 +482,7 @@ public sealed class SoundFx : IDisposable
                 _checks++; _checkMs += Stopwatch.GetElapsedTime(c0).TotalMilliseconds;
                 if (real) _impacts++; else _vetoed++;
             }
-            if (real) Fire(SoundKind.Impact, impact, impactScore, Environment.TickCount64, name, $", check {check:F2}" + heardAs, at);
+            if (real) Fire(SoundKind.Impact, impact, impactScore, Environment.TickCount64, topName, $", check {check:F2}" + heardAs, at);
         });
     }
 
