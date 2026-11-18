@@ -44,7 +44,7 @@ public sealed class LightService : IDisposable
     static readonly Pulse ChargePulse = new(150, 600, 900), ShiftBlink = new(20, 60, 80),
         ShotPulse = new(10, 30, 150); // one shot: a quick orange blink, so a burst reads as separate shots
     /// <summary>An impact by its strength 0..1: 0.4 s and dim for a touch, 1.6 s and bright for a heavy crash.</summary>
-    static Pulse ImpactPulse(double s) => new(60 + (int)(60 * s), 80 + (int)(520 * s), 260 + (int)(640 * s));
+    static Pulse ImpactPulse(double s) => new(25 + (int)(25 * s), 80 + (int)(520 * s), 260 + (int)(640 * s)); // a quick rise: a slow one read as lag
 
     /// <summary>Brightness 0..1 of a one-shot effect over time: smooth rise, hold, then a squared fall
     /// (LED light looks linear to the eye only on a curve; a straight fall seems to hang, then drop).</summary>
@@ -62,7 +62,12 @@ public sealed class LightService : IDisposable
     }
 
     readonly StickLights _lights = new();
-    readonly System.Threading.Timer _frame, _slow;
+    readonly System.Threading.Timer _slow;
+    // the frames: a thread of their own above normal, woken at once by a new effect (a timer of the thread pool waited up to
+    // a frame, longer while a game kept the processor busy)
+    readonly Thread _frame;
+    readonly AutoResetEvent _kick = new(false);
+    volatile bool _closing;
     readonly DisplayWatcher _display;
     AppSettings _s = new();
     SoundFx? _sound;
@@ -95,7 +100,12 @@ public sealed class LightService : IDisposable
     {
         _display = new DisplayWatcher();
         _accent = ReadAccent();
-        _frame = new System.Threading.Timer(_ => Frame(), null, 500, FrameMs);
+        _frame = new Thread(() =>
+        {
+            _kick.WaitOne(500);
+            while (!_closing) { Frame(); _kick.WaitOne(FrameMs); }
+        }) { IsBackground = true, Name = "lights frame", Priority = ThreadPriority.AboveNormal };
+        _frame.Start();
         _slow = new System.Threading.Timer(_ => Slow(), null, 1000, 1000);
         Log.Write("lights: service started");
     }
@@ -130,6 +140,7 @@ public sealed class LightService : IDisposable
     {
         if (_docked) return;
         lock (_gate) { _fx = SoundKind.Impact; _fxStrength = strength; _fxStart = Environment.TickCount64; _fxMs = ImpactPulse(strength).Total; }
+        _kick.Set();
     }
 
     void OnSound(SoundKind kind, double strength)
@@ -147,21 +158,23 @@ public sealed class LightService : IDisposable
                 case SoundKind.Shot:
                     if (!MyShot(now, strength)) return;
                     _shotStart = now; _shotStrength = strength;
-                    return;
+                    break;
                 case SoundKind.Siren:
                     // police lights while the siren wails, out right after it
                     if (now >= _sirenUntil) _sirenStart = now;
                     _sirenUntil = now + Math.Max(HeardHold, SirenPeriod);
-                    return;
+                    break;
                 case SoundKind.Horn:
                     // yellow while the horn sounds: a beep is short, a long honk stays on, as bright as it is loud
                     if (now >= _hornUntil) _hornStart = now;
                     _hornUntil = now + HeardHold; _hornStrength = strength;
-                    return;
+                    break;
             }
+            if (kind != SoundKind.Impact) { _kick.Set(); return; }
             _fx = kind; _fxStrength = strength; _fxStart = now;
             _fxMs = ImpactPulse(strength).Total;
         }
+        _kick.Set();
     }
 
     /// <summary>
@@ -436,7 +449,8 @@ public sealed class LightService : IDisposable
 
     public void Dispose()
     {
-        _frame.Dispose(); _slow.Dispose();
+        _closing = true; _kick.Set(); _frame.Join(1000);
+        _slow.Dispose();
         _sound?.Dispose();
         _telemetry?.Dispose();
         _pad.Dispose();
