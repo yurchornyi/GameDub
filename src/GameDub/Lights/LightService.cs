@@ -203,7 +203,7 @@ public sealed class LightService : IDisposable
         bool mine = fire switch
         {
             PadInput.Fire.Unknown or PadInput.Fire.Pulled => true,
-            PadInput.Fire.Fell => strong,
+            PadInput.Fire.Fell => strong && (myGun <= 0 || loud >= 0.3 * myGun),   // a light touch of the aim is a fall too
             PadInput.Fire.Held => asMyGun || (strong && now - _mineTick < BurstGapMs),
             _ => false,
         };

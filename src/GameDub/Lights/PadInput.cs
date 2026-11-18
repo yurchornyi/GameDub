@@ -157,9 +157,10 @@ sealed class PadInput : IDisposable
         if (active) Interlocked.Exchange(ref _activeTick, Environment.TickCount64);
     }
 
-    /// <summary>Both triggers from Z (+1 the left one, -1 the right one). A fall of 0.35 from 0.4 or more is the right
+    /// <summary>Both triggers from Z (+1 the left one, -1 the right one). A fall of 0.15 from 0.4 or more is the right
     /// trigger pulled with the left one held, or the left one let go; until Z comes back near where the left one alone
-    /// had it, both may still be held.</summary>
+    /// had it, both may still be held. A light pull fires in GTA: the player's shots came with Z at 0.8 under a full aim
+    /// (18.11, a fall of 0.35 missed them).</summary>
     void Triggers(double z)
     {
         long now = Environment.TickCount64;
@@ -167,7 +168,7 @@ sealed class PadInput : IDisposable
         _z = (float)z; _known = true;
         if (z < -0.15) Interlocked.Exchange(ref _rightTick, now);
         if (z > _zHigh) _zHigh = z;
-        else if (_zHigh >= 0.4 && z <= _zHigh - 0.35)
+        else if (_zHigh >= 0.4 && z <= _zHigh - 0.15)
         {
             Interlocked.Exchange(ref _fallTick, now);
             _aim = _held ? Math.Max(_aim, _zHigh) : _zHigh;
@@ -175,7 +176,7 @@ sealed class PadInput : IDisposable
         }
         // back up near the aim alone: the right trigger let go. Fingers move both triggers a little during a long burst
         // (a band of 0.25 around the fall lost long bursts in GTA Online, 18.11), so anywhere below that counts as held.
-        if (_held && z > _aim - 0.2) _held = false;
+        if (_held && z > _aim - 0.1) _held = false;
     }
 
     Pad? Find(IntPtr device)
