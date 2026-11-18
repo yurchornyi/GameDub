@@ -187,7 +187,9 @@ public sealed class LightService : IDisposable
     /// the aim held (the left trigger) is only a fall of that axis, like letting the aim go: a shot right after a fall
     /// counts, and while the axis stays below the aim alone, the next shots count as long as they come less than 1 s apart
     /// (an automatic burst with both held). No pad to read (another kind of pad, or none has spoken yet): every shot, as
-    /// before. In a car the right trigger is the gas, so there all shots show.
+    /// before. In a car the right trigger is the gas (owner, 18.11: the police's shots lit while he drove): so a shot
+    /// counts at once only within 0.6 s of pressing the right trigger down (fire); later in a long hold it must be as loud
+    /// as his gun, like with the aim.
     /// Letting the aim go looks like that fall too, and the police shots right after it flashed (GTA Online, 18.11: «коли я
     /// постріляв, тоді блимає»), so with the aim in play a shot counts only when it is as loud as the player's own gun:
     /// at least 60 % of it (learned from his sure shots; the police's were up to half of it). A burst no longer carries
@@ -202,18 +204,21 @@ public sealed class LightService : IDisposable
         // with both triggers held together Z stays in the middle (GTA Online, 18.11: most of the player's long bursts were
         // dark this way, «Held», as loud as the loudest): his gun's own loudness tells
         bool asMyGun = myGun > 0 && loud >= MyGunShare * myGun;
+        bool fresh = now - _pad.PressTick < FireMs;      // the right trigger pressed down just now: fire, not a held gas
         bool mine = fire switch
         {
-            PadInput.Fire.Unknown or PadInput.Fire.Pulled => true,
+            PadInput.Fire.Unknown => true,
+            PadInput.Fire.Pulled => fresh || (myGun > 0 ? asMyGun : strong),
             PadInput.Fire.Fell => myGun > 0 ? asMyGun : strong,
             PadInput.Fire.Held => myGun > 0 ? asMyGun : strong && now - _mineTick < BurstGapMs,
             _ => false,
         };
-        string how = $"trigger {fire}, Z {_pad.Z:F2}, strength {strength:F2}, loud {loud:F3}, own gun {myGun:F3}";
+        string how = $"trigger {fire}, Z {_pad.Z:F2}, pressed {(now - _pad.PressTick) / 1000.0:F1} s ago, strength {strength:F2}, loud {loud:F3}, own gun {myGun:F3}";
         if (mine)
         {
             // an average of his sure shots: the loudest one alone (a near blast read as a shot) set the bar too high (18.11)
-            if (fire is PadInput.Fire.Pulled or PadInput.Fire.Fell && strong) { _myGun = myGun > 0 ? myGun + 0.3 * (loud - myGun) : loud; _myGunTick = now; }
+            // his sure shots: right after a press (not a long hold, which may be the gas) or a fall
+            if ((fire == PadInput.Fire.Pulled && fresh || fire == PadInput.Fire.Fell) && strong) { _myGun = myGun > 0 ? myGun + 0.3 * (loud - myGun) : loud; _myGunTick = now; }
             else if (myGun > 0 && loud >= MyGunShare * myGun) _myGunTick = now; // still his gun: keep it in mind
             if (now - _mineTick > 2000) Log.Write($"lights: the player's shot ({how})");
             _mineTick = now; _shotsMine++; return true;

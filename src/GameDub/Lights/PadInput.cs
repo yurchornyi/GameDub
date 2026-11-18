@@ -59,12 +59,13 @@ sealed class PadInput : IDisposable
     // the right trigger, from the same Z: a pull seen (Z under the middle), a fall from the left side, the level after it
     volatile bool _known, _held;
     volatile float _z;
-    long _rightTick, _fallTick, _zMoveTick;
+    long _rightTick, _fallTick, _zMoveTick, _pressTick;
     double _zPrev;
-    const int HeldMs = 5000;
+    bool _wasPulled;                                        // the pad thread's only
+    const int HeldMs = 5000;                                // a magazine in GTA is ~3 s of automatic fire
     // Z under the middle means the right trigger is pressed more than the left: a trigger at rest reads exactly 0, so even
     // a little counts. Both held in GTA read -0.02..-0.03 (the aim stops short of full), which -0.15 missed (18.11).
-    const double RightPulled = -0.015;                                // a magazine in GTA is ~3 s of automatic fire
+    const double RightPulled = -0.015;
     double _zHigh, _aim;                                    // the pad thread's only; _aim: Z with the left one alone
     byte[] _report = Array.Empty<byte>();
     readonly ushort[] _pressed = new ushort[32];
@@ -97,6 +98,9 @@ sealed class PadInput : IDisposable
     /// <summary>The last Z, for the log: +1 the left trigger alone, -1 the right one alone.</summary>
     public double Z => _z;
 
+    /// <summary>When the right trigger was last pressed down (TickCount64): a fresh press is fire, a long hold may be gas.</summary>
+    public long PressTick => Interlocked.Read(ref _pressTick);
+
     public Fire RightTrigger(long now, int withinMs)
     {
         if (!_known) return Fire.Unknown;
@@ -122,7 +126,7 @@ sealed class PadInput : IDisposable
         };
         if (!RegisterRawInputDevices(d, (uint)d.Length, (uint)Marshal.SizeOf<RawInputDevice>()))
             Log.Write($"pad: raw input {(on ? "on" : "off")} failed, error {Marshal.GetLastWin32Error()}");
-        if (!on) { _left = 0; _z = 0; _known = _held = false; _zHigh = _aim = 0; }
+        if (!on) { _left = 0; _z = 0; _known = _held = _wasPulled = false; _zHigh = _aim = 0; }
     }
 
     void OnInput(IntPtr handle)
@@ -173,7 +177,13 @@ sealed class PadInput : IDisposable
         _z = (float)z; _known = true;
         if (Math.Abs(z - _zPrev) > 0.02) Interlocked.Exchange(ref _zMoveTick, now);
         _zPrev = z;
-        if (z < RightPulled) Interlocked.Exchange(ref _rightTick, now);
+        bool pulled = z < RightPulled;
+        if (pulled)
+        {
+            Interlocked.Exchange(ref _rightTick, now);
+            if (!_wasPulled) Interlocked.Exchange(ref _pressTick, now);
+        }
+        _wasPulled = pulled;
         if (z > _zHigh) _zHigh = z;
         else if (_zHigh >= 0.4 && z <= _zHigh - 0.08)
         {
