@@ -33,6 +33,7 @@ public sealed class TrayApp : ApplicationContext
     RegionEditor? _editor;
     Lights.LightService? _lights;
     QuietLaunchers? _quiet;
+    GameScreen? _screen;
     string _lastStatus = "";
 
     public static int Run()
@@ -98,6 +99,7 @@ public sealed class TrayApp : ApplicationContext
         _hotkeys.Register(HotkeyRegion, _s.HotkeyRegion);
         ApplyLights();
         ApplyQuiet();
+        ApplyScreen();
         if (settingsChanged && _pipe != null) StopPipe(); // restarted with new settings on this tick
     }
 
@@ -107,6 +109,7 @@ public sealed class TrayApp : ApplicationContext
         {
             Reload();
             _quiet?.Tick();
+            _screen?.Tick(QuietLaunchers.GameInFront());
             var hit = _enabled.Count == 0 ? null : _matcher.FindRunning(_enabled);
             if (hit == null)
             {
@@ -166,6 +169,16 @@ public sealed class TrayApp : ApplicationContext
         catch (Exception ex) { Log.Error("quiet launchers", ex); }
     }
 
+    void ApplyScreen()
+    {
+        try
+        {
+            if (_s.GameScreen) _screen ??= new GameScreen();
+            else { _screen?.Dispose(); _screen = null; }   // the desktop look back
+        }
+        catch (Exception ex) { Log.Error("game screen", ex); }
+    }
+
     void StopPipe()
     {
         _editor?.Close();
@@ -215,6 +228,7 @@ public sealed class TrayApp : ApplicationContext
         StopPipe();
         _lights?.Dispose();
         _quiet?.Dispose();
+        _screen?.Dispose();
         _icon.Visible = false;
         _icon.Dispose();
         _hotkeys.DestroyHandle();

@@ -85,6 +85,10 @@ public static class Program
                 Thread.Sleep(secs * 1000);
                 break;
             }
+            case "game-screen":
+                // --test game-screen: AMD Vari-Bright and saturation as ADLX sees them, the game look for 5 s, then back
+                Tray.GameScreen.Test(o);
+                break;
             case "soundfx-files":
             {
                 // --test soundfx-files <file>...: play sound files into the effects in real time, no speakers
