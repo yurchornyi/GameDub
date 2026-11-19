@@ -304,6 +304,14 @@ sealed class QuietLaunchers : IDisposable
     static string? GroupOf(string? path) =>
         IsLauncher(path) ? Groups.First(g => path!.Contains(g.dir, StringComparison.OrdinalIgnoreCase)).name : null;
 
+    /// <summary>A game is the window in front now (the same test as for the launchers; for the game screen).</summary>
+    public static bool GameInFront()
+    {
+        var hwnd = GetForegroundWindow();
+        int pid = PidOf(hwnd);
+        return pid != 0 && IsGameWindow(hwnd, Native.GetProcessPath(pid));
+    }
+
     static bool IsGameWindow(IntPtr hwnd, string? path)
     {
         if (path == null || IsLauncher(path)) return false;

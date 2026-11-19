@@ -93,6 +93,10 @@ public sealed class AppSettings
     // Launchers out of the way (Tray\QuietLaunchers): no start with Windows, never over the game, closed after it.
     public bool QuietLaunchers { get; set; } = true;
 
+    // The screen like an OLED in games (Tray\GameScreen): AMD Vari-Bright at its strongest and richer colors while a game
+    // is in front, the owner's own settings on the desktop (owner, 19.11).
+    public bool GameScreen { get; set; } = true;
+
     public void NormalizeApiKeys()
     {
         GoogleApiKeys = CleanApiKeys(GoogleApiKeys, GoogleApiKey);

@@ -297,6 +297,8 @@ public sealed class MainWindow : Window
         list.Children.Add(Toggle("Автозапуск служби з Windows", Autostart.IsEnabled, Autostart.Set));
         list.Children.Add(Toggle("Тихі лаунчери", () => _s.QuietLaunchers, v => { _s.QuietLaunchers = v; SaveSettings(); },
             "Epic, Ubisoft, Rockstar, EA, Battle.net, GOG: не стартують із Windows, не вискакують поверх гри, закриваються після неї · Steam не чіпає"));
+        list.Children.Add(Toggle("Екран як OLED у грі", () => _s.GameScreen, v => { _s.GameScreen = v; SaveSettings(); },
+            "Поки гра на екрані — Vari-Bright AMD на максимум (глибше чорне) і кольори на п'яту соковитіші · на робочому столі — як у тебе в AMD"));
         list.Children.Add(Info("Пауза перекладу (кнопка M1)", KeyNames(_s.HotkeyPause)));
         list.Children.Add(Info("Перевибір області (кнопка M2)", KeyNames(_s.HotkeyRegion)));
 
