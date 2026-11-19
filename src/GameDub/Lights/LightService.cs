@@ -43,7 +43,7 @@ public sealed class LightService : IDisposable
     const double MineLoudness = 0.4;   // with the aim held, the player's shot is at least this share of the loudest lately
     // both triggers on the middle of Z: held together, or both let go. A shot at least 60 % as loud as the player's own gun
     // (learned from his sure shots, forgotten by half in a minute) is his.
-    const double MyGunShare = 0.55;
+    const double MyGunShare = 0.55, FreshShare = 0.3;
     static readonly Pulse ChargePulse = new(150, 600, 900), ShiftBlink = new(20, 60, 80),
         ShotPulse = new(10, 30, 150); // one shot: a quick orange blink, so a burst reads as separate shots
     /// <summary>An impact by its strength 0..1: 0.4 s and dim for a touch, 1.6 s and bright for a heavy crash.</summary>
@@ -208,7 +208,10 @@ public sealed class LightService : IDisposable
         bool mine = fire switch
         {
             PadInput.Fire.Unknown => true,
-            PadInput.Fire.Pulled => fresh || (myGun > 0 ? asMyGun : strong),
+            // a quiet shot right after his own (echoes in the city, a far shot) blinked on after he stopped (GTA, 19.11:
+            // «як я постріляв, воно потім ще доганяло і блимало», 0.011 against his gun's 0.064): once his gun is known, a shot
+            // just after a press needs a third of its loudness, later in a hold more than half
+            PadInput.Fire.Pulled => myGun > 0 ? loud >= (fresh ? FreshShare : MyGunShare) * myGun : fresh || strong,
             PadInput.Fire.Fell => myGun > 0 ? asMyGun : strong,
             // before his gun is known (the start of a game): the loudest shot lately, or a burst going on
             PadInput.Fire.Held => myGun > 0 ? asMyGun : strength >= 0.8 || (strong && now - _mineTick < BurstGapMs),
