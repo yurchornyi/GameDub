@@ -62,7 +62,9 @@ sealed class PadInput : IDisposable
     long _rightTick, _fallTick, _zMoveTick, _pressTick;
     double _zPrev;
     bool _wasPulled;                                        // the pad thread's only
-    const int HeldMs = 5000;                                // a magazine in GTA is ~3 s of automatic fire
+    // «both held» lasts this long after Z last moved: the player held fire 9-14 s in GTA (19.11), and both let go leave
+    // Z there too, so the shot's loudness against his own gun decides (LightService)
+    const int HeldMs = 30_000;
     // Z under the middle means the right trigger is pressed more than the left: a trigger at rest reads exactly 0, so even
     // a little counts. Both held in GTA read -0.02..-0.03 (the aim stops short of full), which -0.15 missed (18.11).
     const double RightPulled = -0.015;
@@ -183,6 +185,9 @@ sealed class PadInput : IDisposable
             Interlocked.Exchange(ref _rightTick, now);
             if (!_wasPulled) Interlocked.Exchange(ref _pressTick, now);
         }
+        // up from under the middle back to it: the left trigger pressed while the right one is held (fire first, then the
+        // aim: 19.11, such long holds went dark), or the right one let go
+        if (_wasPulled && !pulled && z < 0.5) { _held = true; _aim = Math.Max(_aim, 0.95); _zHigh = Math.Max(z, 0); }
         _wasPulled = pulled;
         if (z > _zHigh) _zHigh = z;
         else if (_zHigh >= 0.4 && z <= _zHigh - 0.08)

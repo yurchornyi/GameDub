@@ -210,7 +210,8 @@ public sealed class LightService : IDisposable
             PadInput.Fire.Unknown => true,
             PadInput.Fire.Pulled => fresh || (myGun > 0 ? asMyGun : strong),
             PadInput.Fire.Fell => myGun > 0 ? asMyGun : strong,
-            PadInput.Fire.Held => myGun > 0 ? asMyGun : strong && now - _mineTick < BurstGapMs,
+            // before his gun is known (the start of a game): the loudest shot lately, or a burst going on
+            PadInput.Fire.Held => myGun > 0 ? asMyGun : strength >= 0.8 || (strong && now - _mineTick < BurstGapMs),
             _ => false,
         };
         string how = $"trigger {fire}, Z {_pad.Z:F2}, pressed {(now - _pad.PressTick) / 1000.0:F1} s ago, strength {strength:F2}, loud {loud:F3}, own gun {myGun:F3}";
@@ -218,7 +219,8 @@ public sealed class LightService : IDisposable
         {
             // an average of his sure shots: the loudest one alone (a near blast read as a shot) set the bar too high (18.11)
             // his sure shots: right after a press (not a long hold, which may be the gas) or a fall
-            if ((fire == PadInput.Fire.Pulled && fresh || fire == PadInput.Fire.Fell) && strong) { _myGun = myGun > 0 ? myGun + 0.3 * (loud - myGun) : loud; _myGunTick = now; }
+            // learned only from the loudest shots lately: a quiet far shot after a slip of the aim set it at 0.028 (19.11)
+            if ((fire == PadInput.Fire.Pulled && fresh || fire == PadInput.Fire.Fell) && strength >= 0.7) { _myGun = myGun > 0 ? myGun + 0.3 * (loud - myGun) : loud; _myGunTick = now; }
             else if (myGun > 0 && loud >= MyGunShare * myGun) _myGunTick = now; // still his gun: keep it in mind
             if (now - _mineTick > 2000) Log.Write($"lights: the player's shot ({how})");
             _mineTick = now; _shotsMine++; return true;
