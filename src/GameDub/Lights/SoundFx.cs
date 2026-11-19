@@ -31,10 +31,10 @@ public enum SoundKind { Impact, Siren, Horn, Shot }
 ///   a cut alone in silence (the model averages over its second: "Silence"), a cut repeated over the second
 ///   (footsteps then read as gunfire).
 /// - Lasting sounds (sirens, horns, an engine) are looked at twice a second over the last second. A siren
-///   is shown at once when a look hears it at 0.5, or once two looks within 2 s hear it at 0.3, and kept while it is
-///   heard within 2.5 s: in GTA 5 the model heard police sirens on and off, and the lights flickered; two looks in a row
-///   missed a car alarm, which beeps on and off (GTA Online, 18.11: «Car alarm» up to 0.62, never twice in a row; police
-///   sirens came in at 0.64-0.77 one look before the light).
+///   is shown once two looks within 2 s hear it at 0.3, and kept while it is heard within 2.5 s: in GTA 5 the model heard
+///   police sirens on and off, and the lights flickered; two looks in a row missed a car alarm, which beeps on and off
+///   (GTA Online, 18.11: «Car alarm» up to 0.62, never twice in a row). One look alone, however sure, does not start it:
+///   at 0.5 single looks in the radio's music lit the police lights with nothing there (19.11, 0.55-0.77).
 /// A loudness detector without the model was tried for crashes (16.11) and dropped: it flashed on starts, menus and
 /// gear shifts in Wreckfest.
 /// A blast is checked by a second model, EfficientAT (mn10_as, JKU Linz, AudioSet, mAP 0.47 against YAMNet's 0.31),
@@ -77,7 +77,7 @@ public sealed class SoundFx : IDisposable
     static readonly string[] DoorNames = { "Door", "Sliding door", "Slam", "Knock", "Tap", "Thump, thud", "Bang" };
     static readonly string[] GunNames = { "Gunshot, gunfire", "Machine gun", "Fusillade", "Artillery fire", "Cap gun" };
     static readonly string[] FootNames = { "Walk, footsteps", "Run", "Shuffle" };
-    const double GunScore = 0.2, ShotLoudness = 0.15, ImpactScore = 0.35, SirenScore = 0.3, SirenSure = 0.5, SirenKeep = 0.25;
+    const double GunScore = 0.2, ShotLoudness = 0.15, ImpactScore = 0.35, SirenScore = 0.3, SirenKeep = 0.25;
     // with the blast check: YAMNet proposes at 0.2, EfficientAT confirms at 0.1 (its scores run lower)
     const double ImpactProposal = 0.2, CheckScore = 0.1;
     const int CheckRate = 32000, CheckWindow = CheckRate, CheckPadded = CheckRate * 10;
@@ -637,7 +637,7 @@ public sealed class SoundFx : IDisposable
             // neither flickers nor starts on a blip
             if (siren >= SirenScore)
             {
-                if (siren >= SirenSure || now - _sirenHitTick <= 2000) _sirenOnUntil = now + 2500;
+                if (now - _sirenHitTick <= 2000) _sirenOnUntil = now + 2500;
                 else if (now - _sirenLogTick > 5000)
                 {
                     int best = _siren[0]; double bestScore = 0;
