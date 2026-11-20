@@ -64,7 +64,11 @@ public sealed class LightService : IDisposable
         }
     }
 
-    readonly StickLights _lights = new();
+    // The lamps. After the console slept, Windows may keep the old link «taken» for good while it hands the lamps to a new
+    // one (20.11: from 00:09 to 19:20 nothing lit, «lights: taken by another app», until the tray was restarted; a new link
+    // was «ours» at once). So lamps taken for 30 s with the screen on are opened again, at most once a minute.
+    volatile StickLights _lights = new();
+    long _takenSince, _reopenTick, _reopenLogTick;
     readonly System.Threading.Timer _slow;
     // the frames: a thread of their own above normal, woken at once by a new effect (a timer of the thread pool waited up to
     // a frame, longer while a game kept the processor busy)
@@ -85,6 +89,7 @@ public sealed class LightService : IDisposable
     long _fxStart; int _fxMs; SoundKind? _fx; double _fxStrength;
     long _shotStart; double _shotStrength; // the last shot: its own short pulse, over an impact's longer one
     long _mineTick, _darkLogTick; int _shotsMine, _shotsDark; // the player's last own shot; shots over a minute, for the log
+    long _sureTick;                                           // his last shot told by the trigger or his gun's loudness
     double _myGun; long _myGunTick;                           // the loudness of the player's own gun, from his sure shots
     // a siren or a horn heard in the game: lit from its start until its until, moved on while it is heard
     long _sirenStart, _sirenUntil, _hornStart, _hornUntil; double _hornStrength;
@@ -214,7 +219,9 @@ public sealed class LightService : IDisposable
             PadInput.Fire.Pulled => myGun > 0 ? loud >= (fresh ? FreshShare : MyGunShare) * myGun : fresh || strong,
             PadInput.Fire.Fell => myGun > 0 ? asMyGun : strong,
             // before his gun is known (the start of a game): the loudest shot lately, or a burst going on
-            PadInput.Fire.Held => myGun > 0 ? asMyGun : strength >= 0.8 || (strong && now - _mineTick < BurstGapMs),
+            // the loudest shot lately counts too while he is surely shooting (within 2 s of a sure shot): in Call of Duty his own
+            // gun ran from 0.08 to 0.54 (20.11), and the louder ones raised the bar over the rest
+            PadInput.Fire.Held => myGun > 0 ? asMyGun || (strength >= 0.9 && now - _sureTick < 2000) : strength >= 0.8 || (strong && now - _mineTick < BurstGapMs),
             _ => false,
         };
         string how = $"trigger {fire}, Z {_pad.Z:F2}, pressed {(now - _pad.PressTick) / 1000.0:F1} s ago, strength {strength:F2}, loud {loud:F3}, own gun {myGun:F3}";
@@ -223,14 +230,33 @@ public sealed class LightService : IDisposable
             // an average of his sure shots: the loudest one alone (a near blast read as a shot) set the bar too high (18.11)
             // his sure shots: right after a press (not a long hold, which may be the gas) or a fall
             // learned only from the loudest shots lately: a quiet far shot after a slip of the aim set it at 0.028 (19.11)
-            if ((fire == PadInput.Fire.Pulled && fresh || fire == PadInput.Fire.Fell) && strength >= 0.7) { _myGun = myGun > 0 ? myGun + 0.3 * (loud - myGun) : loud; _myGunTick = now; }
+            // one shot moves it at most to twice the average: a single 0.54 lifted it from 0.19 to 0.42 (CoD, 20.11)
+            if ((fire == PadInput.Fire.Pulled && fresh || fire == PadInput.Fire.Fell) && strength >= 0.7)
+            {
+                _myGun = myGun > 0 ? myGun + 0.2 * (Math.Min(loud, 2 * myGun) - myGun) : loud; _myGunTick = now;
+            }
             else if (myGun > 0 && loud >= MyGunShare * myGun) _myGunTick = now; // still his gun: keep it in mind
+            if (fire == PadInput.Fire.Pulled && fresh || fire == PadInput.Fire.Fell || asMyGun) _sureTick = now;
             if (now - _mineTick > 2000) Log.Write($"lights: the player's shot ({how})");
             _mineTick = now; _shotsMine++; return true;
         }
         _shotsDark++;
         if (now - _darkLogTick > 2000) { _darkLogTick = now; Log.Write($"lights: a shot left dark, not the player's ({how})"); }
         return false;
+    }
+
+    /// <summary>Lamps taken for 30 s while the screen is on: a fresh link to them (see _lights). A game that drives the lamps
+    /// itself keeps them anyway; then this only tries again once a minute.</summary>
+    void ReopenTakenLamps(long now)
+    {
+        if (_display.Off || _docked || _lights.Available || _lights.Count == 0) { _takenSince = 0; return; }
+        if (_takenSince == 0) { _takenSince = now; return; }
+        if (now - _takenSince < 30_000 || now - _reopenTick < 60_000) return;
+        _reopenTick = now;
+        var old = _lights;
+        _lights = new StickLights();
+        old.Dispose();
+        if (now - _reopenLogTick > 10 * 60_000) { _reopenLogTick = now; Log.Write("lights: the lamps were taken for 30 s: opened again"); }
     }
 
     /// <summary>Every second: things that change slowly.</summary>
@@ -242,6 +268,7 @@ public sealed class LightService : IDisposable
             long now = Environment.TickCount64;
             _sound?.FollowDefaultDevice();
             _docked = Dock.OnTv();
+            ReopenTakenLamps(now);
             if ((_docked ? 1 : 0) != _dockLogged) { _dockLogged = _docked ? 1 : 0; Log.Write(_docked ? "lights: console on a TV, lights off" : "lights: handheld"); }
             if (_sound is { } snd) snd.Paused = _docked || _display.Off;
             long padAt = _pad.ActiveTick; bool padTouched = padAt != _padSeen; _padSeen = padAt;
