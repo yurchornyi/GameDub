@@ -40,7 +40,9 @@ public static class Log
             try
             {
                 var fi = new FileInfo(Paths.LogFile);
-                if (fi.Exists && fi.Length > 512 * 1024) fi.Delete();
+                // the full log moves to log.old.txt, so the session before it can still be read (the lights fill 512 KB in
+                // about a day of play: 22.11 the dub of the day before was gone)
+                if (fi.Exists && fi.Length > 1024 * 1024) File.Move(fi.FullName, Path.ChangeExtension(fi.FullName, ".old.txt"), true);
                 File.AppendAllText(Paths.LogFile, $"{DateTime.Now:MM-dd HH:mm:ss.fff} {msg}{Environment.NewLine}", Encoding.UTF8);
             }
             catch { }

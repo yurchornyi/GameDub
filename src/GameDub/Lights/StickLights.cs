@@ -53,22 +53,31 @@ public sealed class StickLights : IDisposable
 
     public int Count { get { lock (_gate) return _devices.Count; } }
 
-    /// <summary>True when at least one device takes our colors right now.</summary>
-    public bool Available { get { lock (_gate) return _devices.Values.Any(d => d.Lamps.IsAvailable); } }
+    Device[] Snapshot() { lock (_gate) return _devices.Values.ToArray(); }
+
+    /// <summary>True when at least one device takes our colors right now. Asked outside the lock: a call to a device may
+    /// hang after the console slept, and must not hold up the rest.</summary>
+    public bool Available => Snapshot().Any(d => d.Lamps.IsAvailable);
+
+    /// <summary>A color is being sent right now (for the watchdog's log).</summary>
+    public bool Busy => _busy;
+    volatile bool _busy;
 
     public string Describe()
     {
-        lock (_gate) return _devices.Count == 0 ? "no LampArray devices" :
-            string.Join("; ", _devices.Values.Select(d => $"{d.Lamps.LampCount} lamps, kind={d.Lamps.LampArrayKind}, available={d.Lamps.IsAvailable}, enabled={d.Lamps.IsEnabled}"));
+        var list = Snapshot();
+        return list.Length == 0 ? "no LampArray devices" :
+            string.Join("; ", list.Select(d => $"{d.Lamps.LampCount} lamps, kind={d.Lamps.LampArrayKind}, available={d.Lamps.IsAvailable}, enabled={d.Lamps.IsEnabled}"));
     }
 
     /// <summary>Shows one color per stick. Sends only what changed; skips devices another app holds.</summary>
     public void Show(Rgb left, Rgb right)
     {
         var l = left.ToWin(); var r = right.ToWin();
-        lock (_gate)
+        _busy = true;
+        try
         {
-            foreach (var d in _devices.Values)
+            foreach (var d in Snapshot())
             {
                 try
                 {
@@ -88,6 +97,7 @@ public sealed class StickLights : IDisposable
                 catch (Exception ex) { Log.Error("lights show", ex); d.Shown = null; }
             }
         }
+        finally { _busy = false; }
     }
 
     /// <summary>Lamps left of the device's middle belong to the left stick, the rest to the right one.</summary>
@@ -102,7 +112,10 @@ public sealed class StickLights : IDisposable
     public void Dispose()
     {
         try { _watcher.Stop(); } catch { }
-        lock (_gate) _devices.Clear();
+        Device[] old;
+        lock (_gate) { old = _devices.Values.ToArray(); _devices.Clear(); }
+        // the old links closed, so Windows does not keep one of them as ours (off this thread: a close may hang too)
+        System.Threading.Tasks.Task.Run(() => { foreach (var d in old) try { (d.Lamps as IDisposable)?.Dispose(); } catch { } });
     }
 }
 

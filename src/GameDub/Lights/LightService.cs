@@ -74,6 +74,12 @@ public sealed class LightService : IDisposable
     // a frame, longer while a game kept the processor busy)
     readonly Thread _frame;
     readonly AutoResetEvent _kick = new(false);
+    // A hang anywhere here ends in a restart of the tray (see Watch): 22.11 after the console slept a frame never ended,
+    // and the slow check, once a second on the thread pool, piled up 4,700 waiting threads within a day.
+    long _frameDone = Environment.TickCount64, _slowStart, _watchLast = Environment.TickCount64, _watchQuietUntil;
+    int _slowBusy;
+    volatile string _slowStage = "";
+    readonly Thread _watch;
     volatile bool _closing;
     readonly DisplayWatcher _display;
     AppSettings _s = new();
@@ -112,9 +118,11 @@ public sealed class LightService : IDisposable
         _frame = new Thread(() =>
         {
             _kick.WaitOne(500);
-            while (!_closing) { Frame(); _kick.WaitOne(FrameMs); }
+            while (!_closing) { Frame(); Interlocked.Exchange(ref _frameDone, Environment.TickCount64); _kick.WaitOne(FrameMs); }
         }) { IsBackground = true, Name = "lights frame", Priority = ThreadPriority.AboveNormal };
         _frame.Start();
+        _watch = new Thread(() => { while (!_closing) { Thread.Sleep(5000); Watch(); } }) { IsBackground = true, Name = "lights watchdog" };
+        _watch.Start();
         _slow = new System.Threading.Timer(_ => Slow(), null, 1000, 1000);
         Log.Write("lights: service started");
     }
@@ -259,16 +267,53 @@ public sealed class LightService : IDisposable
         if (now - _reopenLogTick > 10 * 60_000) { _reopenLogTick = now; Log.Write("lights: the lamps were taken for 30 s: opened again"); }
     }
 
-    /// <summary>Every second: things that change slowly.</summary>
+    /// <summary>
+    /// Every 5 s on its own thread: a frame that has not ended for 20 s, or a slow check that runs for a minute, hangs for
+    /// good (a call to the lamps, the sound device or WMI that never comes back): the tray starts again. Time asleep does
+    /// not count: after a gap in its own ticks the watch starts over.
+    /// </summary>
+    void Watch()
+    {
+        long now = Environment.TickCount64;
+        long gap = now - _watchLast; _watchLast = now;
+        if (gap > 15_000)
+        {
+            Interlocked.Exchange(ref _frameDone, now);
+            Interlocked.Exchange(ref _slowStart, now);
+            return;
+        }
+        if (now < _watchQuietUntil || _closing) return;
+        long frame = now - Interlocked.Read(ref _frameDone);
+        long slow = Volatile.Read(ref _slowBusy) == 1 ? now - Interlocked.Read(ref _slowStart) : 0;
+        string? stuck = frame > 20_000 ? $"lights: a frame stuck for {frame / 1000} s{(_lights.Busy ? " in a call to the lamps" : "")}"
+            : slow > 60_000 ? $"lights: the slow check stuck for {slow / 1000} s at «{_slowStage}»" : null;
+        if (stuck == null) return;
+        _watchQuietUntil = now + 10 * 60_000;
+        Tray.TrayApp.Restart(stuck);
+    }
+
+    /// <summary>Every second: things that change slowly. One at a time: a call that hangs must not pile up threads.</summary>
     void Slow()
+    {
+        if (Interlocked.Exchange(ref _slowBusy, 1) == 1) return;
+        Interlocked.Exchange(ref _slowStart, Environment.TickCount64);
+        try { SlowWork(); }
+        finally { Volatile.Write(ref _slowBusy, 0); }
+    }
+
+    void SlowWork()
     {
         try
         {
             AppSettings s; lock (_gate) s = _s;
             long now = Environment.TickCount64;
+            _slowStage = "sound device";
             _sound?.FollowDefaultDevice();
+            _slowStage = "displays";
             _docked = Dock.OnTv();
+            _slowStage = "lamps";
             ReopenTakenLamps(now);
+            _slowStage = "pad and front window";
             if ((_docked ? 1 : 0) != _dockLogged) { _dockLogged = _docked ? 1 : 0; Log.Write(_docked ? "lights: console on a TV, lights off" : "lights: handheld"); }
             if (_sound is { } snd) snd.Paused = _docked || _display.Off;
             long padAt = _pad.ActiveTick; bool padTouched = padAt != _padSeen; _padSeen = padAt;
@@ -292,6 +337,7 @@ public sealed class LightService : IDisposable
                 }
                 _brakeStatTick = now; _brakeHeldFrames = _brakeLitFrames = 0;
             }
+            _slowStage = "brightness";
             if (now - _screenTick > 3000)
             {
                 // 0 % is the console's own download dimming (start.ps1): keep the last real brightness then
@@ -302,6 +348,7 @@ public sealed class LightService : IDisposable
                 s.LightsSkipGames.Any(g => Path.GetFileNameWithoutExtension(front).Equals(g, StringComparison.OrdinalIgnoreCase));
 
             // download: received bytes over all live adapters
+            _slowStage = "network";
             long rx = 0;
             foreach (var n in NetworkInterface.GetAllNetworkInterfaces())
                 if (n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
@@ -325,6 +372,7 @@ public sealed class LightService : IDisposable
             if (was && !_downloading && s.LightsDownload) _downloaded = true;  // green until he touches the console
             if (!s.LightsDownload) _downloaded = false;
 
+            _slowStage = "battery and heat";
             var p = SystemInformation.PowerStatus;
             bool charging = p.PowerLineStatus == PowerLineStatus.Online;
             if (charging && !_charging && s.LightsBattery) _chargeFlashStart = now;
