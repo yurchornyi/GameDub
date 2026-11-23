@@ -17,12 +17,14 @@ namespace GameDub.Tray;
 /// ADLX call, so the saturation of «Custom Color» stands in for it. The desktop values are kept in data\screen-desktop.json
 /// while a game look is on, so a crash or a restart mid-game still puts them back. Without an AMD display: nothing.
 /// The game look stays on while the game is the window in front, and goes 6 s after it is not (an overlay or the
-/// Xbox button's guide come and go).
+/// Xbox button's guide come and go). It comes on only after the game has been in front for 15 s: while a game starts it
+/// sets up its full screen, and the display is left alone then (owner, 23.11: games started in a window).
 /// </summary>
 sealed class GameScreen : IDisposable
 {
     const double SaturationBoost = 1.2;                 // «a fifth more»: AMD's own Vivid Gaming looked right to him (19.11)
     const int AwayTicks = 2;                            // ticks of 3 s without the game in front before the desktop look
+    const int SettleTicks = 5;                          // ticks of 3 s with the game in front before the game look
     static string SavedFile => Path.Combine(Paths.Data, "screen-desktop.json");
 
     /// <summary>One display's settings that the game look changes.</summary>
@@ -30,7 +32,7 @@ sealed class GameScreen : IDisposable
 
     readonly Adlx? _adlx;
     bool _game;
-    int _away;
+    int _away, _front;
 
     public GameScreen()
     {
@@ -47,9 +49,13 @@ sealed class GameScreen : IDisposable
         if (gameInFront)
         {
             _away = 0;
-            if (!_game) { _game = true; GameLook(); }
+            if (!_game && ++_front >= SettleTicks) { _game = true; GameLook(); }
         }
-        else if (_game && ++_away >= AwayTicks) { _game = false; Restore(); }
+        else
+        {
+            _front = 0;
+            if (_game && ++_away >= AwayTicks) { _game = false; Restore(); }
+        }
     }
 
     void GameLook()
@@ -105,7 +111,7 @@ sealed class GameScreen : IDisposable
             using (d)
                 o.AppendLine($"{d.Key}: Vari-Bright supported {d.VariBrightSupported}, on {d.VariBrightEnabled}, level {d.VariBrightLevel}; " +
                     $"saturation supported {d.SaturationSupported}, {d.Saturation} in {d.SaturationRange}");
-        screen.Tick(true);
+        for (int i = 0; i < SettleTicks; i++) screen.Tick(true);
         foreach (var d in adlx.Displays()) using (d) o.AppendLine($"game look: {d.Key}: Vari-Bright on {d.VariBrightEnabled}, level {d.VariBrightLevel}, saturation {d.Saturation}");
         System.Threading.Thread.Sleep(5000);
         screen.Tick(false); screen.Tick(false);

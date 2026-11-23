@@ -23,6 +23,9 @@ namespace GameDub.Tray;
 /// A game is any full-screen window without a title bar of an app that is not Windows, a launcher or a tool. A launcher the player opens
 /// on purpose (through the Xbox button, the task switcher) is not pushed back: only one that takes the screen straight
 /// from the game is.
+/// Nothing is pushed back in a game's first 3 minutes: a game's splash screen is already full screen, and the sign-in,
+/// the update or the terms the launcher then shows are what the game waits for (owner, 23.11: games did not start until
+/// he went to the other window through the Xbox button).
 /// </summary>
 sealed class QuietLaunchers : IDisposable
 {
@@ -56,7 +59,10 @@ sealed class QuietLaunchers : IDisposable
     readonly Dictionary<int, long> _written = new();
     static readonly HashSet<string> Told = new();
     IntPtr _gameWnd, _lastFg;
-    int _gamePid;
+    int _gamePid, _settledPid;
+    long _gameSeenTick;
+    const int SettleMs = 3 * 60_000;
+    bool Settled => _gamePid != 0 && Environment.TickCount64 - _gameSeenTick > SettleMs;
     DateTime _sessionStart, _ended;
     long _pathsTick, _autostartTick;
 
@@ -86,9 +92,15 @@ sealed class QuietLaunchers : IDisposable
         }
         if (_gamePid == 0 && _ended != default && DateTime.UtcNow - _ended > TimeSpan.FromMinutes(1))
         {
-            var since = _sessionStart;
+            var (since, ended) = (_sessionStart, _ended);
             _ended = default; _sessionStart = default;
-            CloseLaunchers(since);
+            CloseLaunchers(since, ended);
+        }
+        // the game has settled in: launcher windows go down now, so none comes up over it later
+        if (Settled && _settledPid != _gamePid && GetForegroundWindow() == _gameWnd)
+        {
+            _settledPid = _gamePid;
+            MinimizeLaunchers();
         }
     }
 
@@ -110,7 +122,7 @@ sealed class QuietLaunchers : IDisposable
         if (IsLauncher(path))
         {
             // Straight from the game: a pop-up, not the player (who comes through the Xbox button or the task switcher).
-            if (_gamePid != 0 && _lastFg == _gameWnd && IsWindow(_gameWnd))
+            if (Settled && _lastFg == _gameWnd && IsWindow(_gameWnd))
             {
                 ShowWindowAsync(hwnd, SW_MINIMIZE);
                 SetForegroundWindow(_gameWnd);
@@ -125,8 +137,8 @@ sealed class QuietLaunchers : IDisposable
                 if (_sessionStart == default) _sessionStart = DateTime.UtcNow;
                 _ended = default;
                 _gamePid = pid;
+                _gameSeenTick = Environment.TickCount64;
                 Log.Write($"quiet launchers: game {Path.GetFileName(path)}");
-                MinimizeLaunchers();
             }
             _gameWnd = hwnd;
         }
@@ -136,19 +148,19 @@ sealed class QuietLaunchers : IDisposable
     /// <summary>A launcher window shown while the game is in front, without taking the screen: put away.</summary>
     void OnShow(IntPtr hwnd)
     {
-        if (_gamePid == 0 || GetForegroundWindow() != _gameWnd) return;
+        if (!Settled || GetForegroundWindow() != _gameWnd) return;
         if (GetAncestor(hwnd, 2) != hwnd || !IsWindowVisible(hwnd)) return;   // top-level only
         var path = PathOf(hwnd, out _);
         if (!IsLauncher(path) || !GetWindowRect(hwnd, out var r)) return;
         long area = (long)(r.Right - r.Left) * (r.Bottom - r.Top);
         if (area <= 0) return;
-        bool popup = (GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64() & WS_EX_TOOLWINDOW) != 0
-            || (GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64() & WS_CAPTION) != WS_CAPTION;
+        // only a tool window (a toast, a friends' notice) is hidden; a window of its own is minimized, so it can be found
+        bool popup = (GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64() & WS_EX_TOOLWINDOW) != 0;
         ShowWindowAsync(hwnd, popup ? SW_HIDE : SW_SHOWMINNOACTIVE);
         Tell(path!, popup ? "pop-up during the game: hidden" : "window during the game: minimized");
     }
 
-    /// <summary>The game is in front: launcher windows go down, so none comes up over it later.</summary>
+    /// <summary>The game is in front and settled: launcher windows go down, so none comes up over it later.</summary>
     void MinimizeLaunchers()
     {
         var pids = LauncherProcesses().Select(p => p.pid).ToHashSet();
@@ -163,8 +175,10 @@ sealed class QuietLaunchers : IDisposable
     /// Rockstar signs in and patches first), is not in front and is not downloading is first asked to close as at
     /// Windows shutdown (Restart Manager). 16.11 Ubisoft Connect and the Rockstar launcher refused that (code 351), so
     /// whatever of it still runs 15 s later is ended. Only this user's processes: the launchers' services stay.
+    /// A launcher with a process started after the game ended is left: it started for the next game (21.11: Ubisoft
+    /// Connect was ended a few seconds after Watch Dogs started it, and the game did not come up).
     /// </summary>
-    void CloseLaunchers(DateTime sinceUtc)
+    void CloseLaunchers(DateTime sinceUtc, DateTime endedUtc)
     {
         int session = Process.GetCurrentProcess().SessionId;
         var fg = PidOf(GetForegroundWindow());
@@ -187,6 +201,7 @@ sealed class QuietLaunchers : IDisposable
         foreach (var (name, procs) in groups)
         {
             if (procs.Any(p => p.pid == fg)) { Tell(name, "in front: left"); continue; }
+            if (procs.Any(p => p.start > endedUtc)) { Log.Write($"quiet launchers: {name} started again after the game: left"); continue; }
             var windowed = procs.Where(p => withWindows.Contains(p.pid)).ToList();
             var first = (windowed.Count > 0 ? windowed : procs).Min(p => p.start);
             if (first < sinceUtc - TimeSpan.FromMinutes(10)) { Tell(name, "opened before the game: left"); continue; }

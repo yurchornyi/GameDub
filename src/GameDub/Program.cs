@@ -16,7 +16,7 @@ public static class Program
     public static int Main(string[] args)
     {
         Paths.Init();
-        if (args.Contains("--tray")) return Tray.TrayApp.Run();
+        if (args.Contains("--tray")) return Tray.TrayApp.Run(args.Contains("--restart"));
         if (args.Length > 0 && args[0] == "--test") return SelfTest(args.Skip(1).ToArray());
 
         // Only one UI at a time; a second launch just brings nothing new up.

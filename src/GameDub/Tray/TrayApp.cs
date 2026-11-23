@@ -36,14 +36,43 @@ public sealed class TrayApp : ApplicationContext
     GameScreen? _screen;
     string _lastStatus = "";
 
-    public static int Run()
+    public static int Run(bool restart = false)
     {
-        _mutex = new Mutex(true, MutexName, out bool created);
-        if (!created) return 0;
+        // a restart (see Restart) waits for the old tray to go; it leaves the mutex abandoned, which is ours then
+        _mutex = new Mutex(false, MutexName);
+        bool mine;
+        try { mine = _mutex.WaitOne(restart ? 30_000 : 0); }
+        catch (AbandonedMutexException) { mine = true; }
+        if (!mine) return 0;
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.Run(new TrayApp());
         return 0;
+    }
+
+    static string RestartFile => System.IO.Path.Combine(Paths.Data, "tray-restart.txt");
+
+    /// <summary>
+    /// A part of the tray hangs for good (22.11: after the console slept, a call to the lamps never came back; within a
+    /// day the tray had 4,700 threads waiting and no light or sound effect worked until a restart): a new tray starts and
+    /// this one ends at once, without waiting on what hangs. At most once in 10 minutes, so a hang that comes back does not
+    /// loop. The game screen look is put back by the new tray (screen-desktop.json).
+    /// </summary>
+    public static void Restart(string why)
+    {
+        try
+        {
+            if (System.IO.File.Exists(RestartFile) && DateTime.UtcNow - System.IO.File.GetLastWriteTimeUtc(RestartFile) < TimeSpan.FromMinutes(10))
+            {
+                Log.Write($"tray: {why}; restarted less than 10 min ago, so not again");
+                return;
+            }
+            System.IO.File.WriteAllText(RestartFile, why);
+            Log.Write($"tray: {why}: the tray starts again");
+            Process.Start(new ProcessStartInfo(Paths.Exe, "--tray --restart") { UseShellExecute = false });
+        }
+        catch (Exception ex) { Log.Error("tray restart", ex); return; }
+        Process.GetCurrentProcess().Kill();
     }
 
     public static bool IsRunning()

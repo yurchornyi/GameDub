@@ -91,6 +91,15 @@ public sealed class SoundFx : IDisposable
         "Whack, thwack", "Shatter", "Glass", "Crumpling, crinkling" };
     static readonly string[] SirenNames = { "Siren", "Civil defense siren", "Police car (siren)", "Ambulance (siren)", "Fire engine, fire truck (siren)",
         "Alarm", "Car alarm", "Smoke detector, smoke alarm", "Fire alarm" };
+    // A helicopter's blades beat 4-5 times a second, loud and sharp: YAMNet names the beats gunfire (GTA 5, 22.11: «Helicopter»
+    // the loudest sound for whole minutes, and there the right trigger is the throttle). While one is heard, a sound is a
+    // shot only when it is more gunfire than aircraft, and the next shots of a burst wait for the model.
+    static readonly string[] AirNames = { "Helicopter", "Aircraft", "Aircraft engine", "Propeller, airscrew" };
+    const double AirScore = 0.3; const int AirKeepMs = 2000;
+    // Tires sliding squeal like a siren (owner, 23.11: in a race, drifting with the gas, the police lights came on): a look
+    // with more squeal than siren is no siren; in a racing game a siren needs 0.5, like the brake and the crashes kept apart
+    static readonly string[] SkidNames = { "Tire squeal", "Skidding" };
+    const double RaceSirenScore = 0.5;
     static readonly string[] HornNames = { "Vehicle horn, car horn, honking", "Air horn, truck horn", "Train horn", "Foghorn" };
     // an engine running: a racing game, where the left trigger is the brake
     static readonly string[] EngineNames = { "Vehicle", "Motor vehicle (road)", "Car", "Race car, auto racing", "Truck", "Motorcycle",
@@ -103,7 +112,8 @@ public sealed class SoundFx : IDisposable
 
     readonly InferenceSession _model;
     readonly string _input, _output;
-    readonly int[] _impact, _gun, _foot, _door, _siren, _horn, _engine, _hint;
+    readonly int[] _impact, _gun, _foot, _door, _siren, _horn, _engine, _hint, _air, _skid;
+    long _airTick = long.MinValue / 2;
     readonly float[] _ring = new float[Rate * 2];
     readonly object _gate = new();
     int _write;
@@ -185,7 +195,7 @@ public sealed class SoundFx : IDisposable
             .Select(l => l.Split(',', 3)).Where(p => p.Length == 3).Select(p => (i: int.Parse(p[0]), name: p[2].Trim().Trim('"'))).ToList();
         int[] Find(string[] wanted) => names.Where(n => wanted.Contains(n.name)).Select(n => n.i).ToArray();
         _impact = Find(ImpactNames); _gun = Find(GunNames); _foot = Find(FootNames); _door = Find(DoorNames); _siren = Find(SirenNames); _horn = Find(HornNames); _engine = Find(EngineNames);
-        _hint = Find(HintNames);
+        _hint = Find(HintNames); _air = Find(AirNames); _skid = Find(SkidNames);
         _names = new string[521];
         foreach (var n in names) if (n.i >= 0 && n.i < 521) _names[n.i] = n.name;
 
@@ -401,7 +411,8 @@ public sealed class SoundFx : IDisposable
         if (rms < 0.01 || rms < 1.6 * before || _samples - _lastOnset < OnsetGap) return;
         _lastOnset = _samples;
         // within 300 ms of a shot, a sound at least 40 % as loud is the next shot of the burst: it flashes now, without the model
-        bool next; lock (_shotGate) next = !Paused && Environment.TickCount64 - _gunTick < 300 && rms >= 0.4 * _gunRms;
+        long tick = Environment.TickCount64;
+        bool next; lock (_shotGate) next = !Paused && tick - _gunTick < 300 && rms >= 0.4 * _gunRms && tick - Interlocked.Read(ref _airTick) > AirKeepMs;
         if (next) { if (_fastShots.Count < 8) _fastShots.Add((rms, _samples - Block)); return; }
         if (_onsets.Count < 8) _onsets.Add((_samples - Block, rms, _blockNo - 1, rms / Math.Max(before, 1e-4)));   // from the start of the block that jumped
     }
@@ -455,11 +466,13 @@ public sealed class SoundFx : IDisposable
         string heardAs = $", loud {rms:F2}, side {cut.Side:+0.00;-0.00;0.00}";
         long t0 = Stopwatch.GetTimestamp();
         var h = Scores(around);
-        double gun = h.Max(_gun), impact = h.Max(_impact), foot = h.Max(_foot), door = h.Max(_door);
+        double gun = h.Max(_gun), impact = h.Max(_impact), foot = h.Max(_foot), door = h.Max(_door), air = h.Max(_air);
         int top = h.Top();
         long now = Environment.TickCount64;
+        if (air >= AirScore) Interlocked.Exchange(ref _airTick, now);
         double loudest; lock (_shotGate) loudest = _loudestShot;
-        bool shot = gun >= GunScore && gun >= impact && gun > foot && rms >= ShotLoudness * loudest;
+        bool shot = gun >= GunScore && gun >= impact && gun > foot && rms >= ShotLoudness * loudest
+            && (gun > air || now - Interlocked.Read(ref _airTick) > AirKeepMs && air < AirScore);
         bool checking = _check != null && around32 != null;
         double impactScore = checking ? ImpactProposal : ImpactScore;
         bool blast = !shot && impact >= impactScore && impact > gun && impact > foot && impact > door;
@@ -627,15 +640,22 @@ public sealed class SoundFx : IDisposable
             var scores = res.First().AsTensor<float>();
             int frames = scores.Dimensions[0];
             double Max(int[] idx) { double m = 0; for (int f = 0; f < frames; f++) foreach (var i in idx) m = Math.Max(m, scores[f, i]); return m; }
-            double impact = Max(_impact), gun = Max(_gun), siren = Max(_siren), horn = Max(_horn);
+            double impact = Max(_impact), gun = Max(_gun), siren = Max(_siren), horn = Max(_horn), skid = Max(_skid);
             long now = Environment.TickCount64;
             if (Max(_engine) > 0.3) Interlocked.Exchange(ref _engineTick, now);
+            if (Max(_air) >= AirScore) Interlocked.Exchange(ref _airTick, now);
+            double sirenStart = Racing ? RaceSirenScore : SirenScore;
+            if (siren >= sirenStart && skid >= siren)
+            {
+                if (now - _sirenLogTick > 5000) { Log.Write($"soundfx: siren {siren:F2} under tires squealing {skid:F2}: no siren"); _sirenLogTick = now; }
+                siren = 0;
+            }
             Stats(scores, frames, impact, gun, siren, horn, now);
             // Sudden sounds are judged one by one as they come (Judge); a look would show them up to a second late.
             // a siren and a horn fire every look while they last: their lights follow the sound
             // a siren: two looks within 1.5 s to start (an alarm beeps on and off), then on while heard within 2.5 s, so it
             // neither flickers nor starts on a blip
-            if (siren >= SirenScore)
+            if (siren >= sirenStart)
             {
                 if (now - _sirenHitTick <= 2000) _sirenOnUntil = now + 2500;
                 else if (now - _sirenLogTick > 5000)
