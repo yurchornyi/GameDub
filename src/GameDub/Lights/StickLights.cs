@@ -112,10 +112,7 @@ public sealed class StickLights : IDisposable
     public void Dispose()
     {
         try { _watcher.Stop(); } catch { }
-        Device[] old;
-        lock (_gate) { old = _devices.Values.ToArray(); _devices.Clear(); }
-        // the old links closed, so Windows does not keep one of them as ours (off this thread: a close may hang too)
-        System.Threading.Tasks.Task.Run(() => { foreach (var d in old) try { (d.Lamps as IDisposable)?.Dispose(); } catch { } });
+        lock (_gate) _devices.Clear();   // LampArray has no Close: the old links go with the garbage collector
     }
 }
 
