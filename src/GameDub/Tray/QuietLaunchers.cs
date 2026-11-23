@@ -81,6 +81,7 @@ sealed class QuietLaunchers : IDisposable
     {
         long now = Environment.TickCount64;
         if (now - _pathsTick > 60_000) { _paths.Clear(); _pathsTick = now; }   // pids get reused
+        try { WatchUac(); } catch (Exception ex) { Log.Error("quiet launchers uac", ex); }
         if (_autostartTick == 0 || now - _autostartTick > 10 * 60_000) { _autostartTick = now; DisableAutostart(); }
 
         if (_gamePid != 0 && !Alive(_gamePid))
@@ -236,6 +237,42 @@ sealed class QuietLaunchers : IDisposable
             }
             catch (Exception ex) { Log.Error("quiet launchers close", ex); }
         });
+    }
+
+    // ---- admin prompts ----
+
+    DateTime _uacSeen;
+    readonly HashSet<int> _uacTold = new();
+
+    /// <summary>
+    /// «Allow this app to make changes to your device?» comes up each time a launcher starts (owner, 23.11), and which
+    /// program asks is not written anywhere. While that prompt (consent.exe) is up and for a minute after, every program
+    /// started around it is written to the log, so the one that asks can be found and dealt with.
+    /// </summary>
+    void WatchUac()
+    {
+        var procs = Process.GetProcesses();
+        try
+        {
+            bool prompt = procs.Any(p => p.ProcessName.Equals("consent", StringComparison.OrdinalIgnoreCase));
+            var now = DateTime.Now;
+            if (prompt && now - _uacSeen > TimeSpan.FromMinutes(1)) { _uacTold.Clear(); Log.Write("uac: a window asks for admin rights"); }
+            if (prompt) _uacSeen = now;
+            if (_uacSeen == default || now - _uacSeen > TimeSpan.FromMinutes(1)) return;
+            foreach (var p in procs)
+            {
+                if (p.Id <= 4 || _uacTold.Contains(p.Id)) continue;
+                DateTime start;
+                try { start = p.StartTime; } catch { continue; }
+                if (start < _uacSeen - TimeSpan.FromSeconds(20) || start > now) continue;
+                _uacTold.Add(p.Id);
+                var path = Native.GetProcessPath(p.Id) ?? p.ProcessName;
+                if (path.StartsWith(Environment.GetFolderPath(Environment.SpecialFolder.Windows) + "\\", StringComparison.OrdinalIgnoreCase)
+                    && !path.EndsWith("consent.exe", StringComparison.OrdinalIgnoreCase)) continue;
+                Log.Write($"uac: started around the prompt at {start:HH:mm:ss}: {path}");
+            }
+        }
+        finally { foreach (var p in procs) p.Dispose(); }
     }
 
     // ---- autostart ----

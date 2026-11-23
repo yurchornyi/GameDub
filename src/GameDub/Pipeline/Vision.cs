@@ -72,45 +72,94 @@ public sealed class OcrService
 
     public OcrService(string subLang = "en")
     {
-        var tag = subLang == "ru" ? "ru-RU" : "en-US";
+        // the console lists Russian as «ru», not «ru-RU»: take the installed recognizer whose tag starts with the language
+        string want = subLang == "ru" ? "ru" : "en";
+        var lang = OcrEngine.AvailableRecognizerLanguages.FirstOrDefault(l => l.LanguageTag.StartsWith(want, StringComparison.OrdinalIgnoreCase))
+                   ?? new Language(subLang == "ru" ? "ru-RU" : "en-US");
         // No fallback to another language: reading Cyrillic with the English engine gives garbage.
-        _engine = OcrEngine.TryCreateFromLanguage(new Language(tag))
-                  ?? throw new InvalidOperationException($"Windows OCR ({tag}) is not available");
+        _engine = OcrEngine.TryCreateFromLanguage(lang)
+                  ?? throw new InvalidOperationException($"Windows OCR ({lang.LanguageTag}) is not available");
     }
 
     public static bool IsAvailable(string subLang) =>
-        OcrEngine.IsLanguageSupported(new Language(subLang == "ru" ? "ru-RU" : "en-US"));
+        OcrEngine.AvailableRecognizerLanguages.Any(l => l.LanguageTag.StartsWith(subLang == "ru" ? "ru" : "en", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
-    /// Subtitles are almost always light text with a dark outline or shadow. Keeping only
-    /// light pixels (as dark text on white) removes busy game backgrounds before OCR.
+    /// Subtitles are almost always light text with a dark outline or shadow. Keeping only light pixels (as dark text on
+    /// white) removes busy game backgrounds before OCR. A speaker's name in orange or red is not light by its gray level
+    /// and was lost (names came out as junk, «Xaæa», 23.11), so a second read also keeps bright strong colors; its name
+    /// («Marcus:») goes before the first read's text when the rest of both agree. A junk-looking first read is checked
+    /// against the picture as it is. Tried on the console (23.11) on outlined 24 px text over a busy background, English
+    /// and Russian: reading it enlarged 2-3 times, or keeping every bright channel, misread more letters.
     /// </summary>
     public bool Binarize { get; set; } = true;
 
     public async Task<List<OcrLine>> RecognizeAsync(Bitmap bmp)
     {
-        var data = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        int scale = bmp.Height < 50 ? 2 : 1;   // only a very low strip (one small line) is enlarged
+        while (scale > 1 && Math.Max(bmp.Width, bmp.Height) * scale > OcrEngine.MaxImageDimension) scale--;
+        int w = bmp.Width * scale, h = bmp.Height * scale;
         byte[] bytes;
-        try
+        using (var big = scale == 1 ? null : new Bitmap(w, h, PixelFormat.Format32bppArgb))
         {
-            bytes = new byte[bmp.Width * bmp.Height * 4];
-            for (int y = 0; y < bmp.Height; y++)
-                Marshal.Copy(data.Scan0 + y * data.Stride, bytes, y * bmp.Width * 4, bmp.Width * 4);
-        }
-        finally { bmp.UnlockBits(data); }
-
-        if (Binarize)
-        {
-            for (int i = 0; i < bytes.Length; i += 4)
+            if (big != null)
+                using (var g = Graphics.FromImage(big))
+                {
+                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                    g.DrawImage(bmp, new Rectangle(0, 0, w, h), 0, 0, bmp.Width, bmp.Height, GraphicsUnit.Pixel);
+                }
+            var src = big ?? bmp;
+            var data = src.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            try
             {
-                int lum = (bytes[i] * 29 + bytes[i + 1] * 150 + bytes[i + 2] * 77) >> 8;
-                byte v = lum > 175 ? (byte)0 : (byte)255;
-                bytes[i] = bytes[i + 1] = bytes[i + 2] = v;
-                bytes[i + 3] = 255;
+                bytes = new byte[w * h * 4];
+                for (int y = 0; y < h; y++)
+                    Marshal.Copy(data.Scan0 + y * data.Stride, bytes, y * w * 4, w * 4);
             }
+            finally { src.UnlockBits(data); }
         }
+        if (!Binarize) return await Read(bytes, w, h, scale);
 
-        using var sb = SoftwareBitmap.CreateCopyFromBuffer(bytes.AsBuffer(), BitmapPixelFormat.Bgra8, bmp.Width, bmp.Height, BitmapAlphaMode.Premultiplied);
+        var light = await Read(Mask(bytes, colors: false), w, h, scale);
+        var (good, bad) = Quality(light);
+        if (bad > 0)
+        {
+            var plain = await Read(bytes, w, h, scale);
+            var (good2, bad2) = Quality(plain);
+            if (good2 - 2 * bad2 > good - 2 * bad) { light = plain; (good, bad) = (good2, bad2); }
+        }
+        if (light.Count == 0) return light;
+        // the speaker's name, when it is colored
+        var colored = await Read(Mask(bytes, colors: true), w, h, scale);
+        string text = string.Join(" ", light.Select(l => l.Text)), all = string.Join(" ", colored.Select(l => l.Text));
+        int colon = all.IndexOf(':');
+        if (colon < 2 || colon > 30 || text.Contains(':')) return light;
+        string name = all[..colon].Trim(), rest = all[(colon + 1)..].Trim();
+        if (!name.All(c => char.IsLetter(c) || c is ' ' or '-' or '\'' or '.') || TextTools.Similarity(rest, text) < 0.85) return light;
+        var box = colored.Select(l => l.Box).Concat(light.Select(l => l.Box)).Aggregate(Rectangle.Union);
+        return new List<OcrLine> { new($"{name}: {text}", box) };
+    }
+
+    /// <summary>Light pixels as black on white; with colors, bright strong colors too (an orange or red name).</summary>
+    static byte[] Mask(byte[] bytes, bool colors)
+    {
+        var m = new byte[bytes.Length];
+        for (int i = 0; i < m.Length; i += 4)
+        {
+            int b = bytes[i], g = bytes[i + 1], r = bytes[i + 2];
+            int lum = (b * 29 + g * 150 + r * 77) >> 8;
+            int max = Math.Max(b, Math.Max(g, r)), min = Math.Min(b, Math.Min(g, r));
+            bool on = lum > 175 || colors && max > 230 && max - min > 150;
+            m[i] = m[i + 1] = m[i + 2] = on ? (byte)0 : (byte)255;
+            m[i + 3] = 255;
+        }
+        return m;
+    }
+
+    async Task<List<OcrLine>> Read(byte[] bytes, int w, int h, int scale)
+    {
+        using var sb = SoftwareBitmap.CreateCopyFromBuffer(bytes.AsBuffer(), BitmapPixelFormat.Bgra8, w, h, BitmapAlphaMode.Premultiplied);
         var result = await _engine.RecognizeAsync(sb);
         var lines = new List<OcrLine>();
         foreach (var l in result.Lines)
@@ -118,9 +167,27 @@ public sealed class OcrService
             if (l.Words.Count == 0) continue;
             double x0 = l.Words.Min(w => w.BoundingRect.X), y0 = l.Words.Min(w => w.BoundingRect.Y);
             double x1 = l.Words.Max(w => w.BoundingRect.X + w.BoundingRect.Width), y1 = l.Words.Max(w => w.BoundingRect.Y + w.BoundingRect.Height);
-            lines.Add(new OcrLine(l.Text, Rectangle.FromLTRB((int)x0, (int)y0, (int)x1, (int)y1)));
+            lines.Add(new OcrLine(l.Text, Rectangle.FromLTRB((int)(x0 / scale), (int)(y0 / scale), (int)Math.Ceiling(x1 / scale), (int)Math.Ceiling(y1 / scale))));
         }
         return lines;
+    }
+
+    /// <summary>Letters in words that look like words, and letters in junk (letters mixed with digits or odd signs, lone
+    /// glyphs).</summary>
+    public static (int good, int bad) Quality(IEnumerable<OcrLine> lines)
+    {
+        int good = 0, bad = 0;
+        foreach (var l in lines)
+            foreach (var raw in l.Text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var word = raw.Trim('.', ',', '!', '?', ':', ';', '"', '\'', '«', '»', '(', ')', '-', '—', '…');
+                if (word.Length == 0) continue;
+                int letters = word.Count(char.IsLetter);
+                bool clean = word.All(c => char.IsLetter(c) || c is '\'' or '-' or '’');
+                if (clean && (letters >= 2 || "IiAaяЯвВиИсСкКуУоОаА".Contains(word))) good += letters;
+                else bad += Math.Max(1, word.Length);
+            }
+        return (good, bad);
     }
 }
 
@@ -132,7 +199,7 @@ public static class TextTools
         var parts = new List<string>();
         foreach (var l in lines)
         {
-            var t = l.Text.Replace('’', '\'').Replace('“', '"').Replace('”', '"').Trim();
+            var t = FixLookalikes(l.Text.Replace('’', '\'').Replace('“', '"').Replace('”', '"').Trim());
             if (!t.Any(c => c is >= 'Ѐ' and <= 'ӿ')) t = t.Replace('|', 'I'); // a misread capital I in Latin text
             int letters = t.Count(char.IsLetter);
             if (letters < 3 || letters < t.Length * 0.5) continue;
@@ -141,6 +208,26 @@ public static class TextTools
         var s = string.Join(" ", parts);
         s = System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ").Trim();
         return s.TrimStart('-', '–', '—', '.', ',', '\'', '"', ' ', '_', '~', '*');
+    }
+
+    const string Latin = "ABCEHKMOPTXaceopxy", Cyrillic = "АВСЕНКМОРТХасеорху";
+
+    /// <summary>The Russian engine writes Latin letters that look Cyrillic inside Cyrillic words («Bce» for «Все»), and
+    /// a translator takes such a word for junk: in a word with Cyrillic letters they become Cyrillic.</summary>
+    public static string FixLookalikes(string s)
+    {
+        if (!s.Any(c => c is >= 'Ѐ' and <= 'ӿ')) return s;
+        var words = s.Split(' ');
+        for (int i = 0; i < words.Length; i++)
+        {
+            var w = words[i];
+            if (!w.Any(c => c is >= 'Ѐ' and <= 'ӿ') || !w.Any(c => Latin.Contains(c))) continue;
+            if (w.Any(c => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' && !Latin.Contains(c))) continue;   // a real Latin word
+            var sb = new StringBuilder(w);
+            for (int k = 0; k < sb.Length; k++) { int j = Latin.IndexOf(sb[k]); if (j >= 0) sb[k] = Cyrillic[j]; }
+            words[i] = sb.ToString();
+        }
+        return string.Join(' ', words);
     }
 
     /// <summary>

@@ -150,6 +150,13 @@ public sealed class DubPipeline : IDisposable
                 var (gender, variant) = VoiceFor(speaker);
                 var tr = await _translator.TranslateAsync(body, speaker, gender, ct);
                 if (tr.Text.Length == 0 || Paused) continue;
+                // a translator gives back what it cannot read (junk from the screen) as it came: no Ukrainian letter, so
+                // nothing is said, instead of English or junk in a Ukrainian voice (owner, 23.11)
+                if (!tr.Text.Any(c => c is >= 'Ѐ' and <= 'ӿ') || TextTools.Similarity(tr.Text, body) > 0.97)
+                {
+                    Log.Write($"not translated, not said: {body} → {tr.Text}");
+                    continue;
+                }
                 // Behind the game? Speak a little faster: +8% per queued item, up to +20%.
                 int backlog = _lines.Reader.Count + _audio.Reader.Count + (waited > 2500 ? 1 : 0);
                 double pace = 1 + Math.Min(0.20, backlog * 0.08);
