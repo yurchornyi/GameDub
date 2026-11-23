@@ -86,17 +86,17 @@ public sealed class OcrService
 
     /// <summary>
     /// Subtitles are almost always light text with a dark outline or shadow. Keeping only light pixels (as dark text on
-    /// white) removes busy game backgrounds before OCR. Light means the strongest channel, not the gray level: a speaker's
-    /// name in orange or red has a low gray level and was dropped, so names came out as junk («Xaæa», 23.11).
-    /// When the light-only read looks like junk, the picture as it is is read too, and the better read wins.
+    /// white) removes busy game backgrounds before OCR. A speaker's name in orange or red is not light by its gray level
+    /// and was lost (names came out as junk, «Xaæa», 23.11), so a second read also keeps bright strong colors; its name
+    /// («Marcus:») goes before the first read's text when the rest of both agree. A junk-looking first read is checked
+    /// against the picture as it is. Tried on the console (23.11) on outlined 24 px text over a busy background, English
+    /// and Russian: reading it enlarged 2-3 times, or keeping every bright channel, misread more letters.
     /// </summary>
     public bool Binarize { get; set; } = true;
 
     public async Task<List<OcrLine>> RecognizeAsync(Bitmap bmp)
     {
-        // Windows OCR reads small text badly: a subtitle strip (one or two lines, ~90 px on a 1080p screen, less when
-        // the game renders lower) is read at two or three times its size
-        int scale = bmp.Height >= 240 ? 1 : bmp.Height >= 120 ? 2 : 3;
+        int scale = bmp.Height < 50 ? 2 : 1;   // only a very low strip (one small line) is enlarged
         while (scale > 1 && Math.Max(bmp.Width, bmp.Height) * scale > OcrEngine.MaxImageDimension) scale--;
         int w = bmp.Width * scale, h = bmp.Height * scale;
         byte[] bytes;
@@ -119,22 +119,42 @@ public sealed class OcrService
             }
             finally { src.UnlockBits(data); }
         }
-
         if (!Binarize) return await Read(bytes, w, h, scale);
-        var light = (byte[])bytes.Clone();
-        for (int i = 0; i < light.Length; i += 4)
+
+        var light = await Read(Mask(bytes, colors: false), w, h, scale);
+        var (good, bad) = Quality(light);
+        if (bad > 0)
         {
-            int max = Math.Max(light[i], Math.Max(light[i + 1], light[i + 2]));
-            byte v = max > 175 ? (byte)0 : (byte)255;
-            light[i] = light[i + 1] = light[i + 2] = v;
-            light[i + 3] = 255;
+            var plain = await Read(bytes, w, h, scale);
+            var (good2, bad2) = Quality(plain);
+            if (good2 - 2 * bad2 > good - 2 * bad) { light = plain; (good, bad) = (good2, bad2); }
         }
-        var first = await Read(light, w, h, scale);
-        var (good, bad) = Quality(first);
-        if (bad == 0) return first;
-        var plain = await Read(bytes, w, h, scale);
-        var (good2, bad2) = Quality(plain);
-        return good2 - 2 * bad2 > good - 2 * bad ? plain : first;
+        if (light.Count == 0) return light;
+        // the speaker's name, when it is colored
+        var colored = await Read(Mask(bytes, colors: true), w, h, scale);
+        string text = string.Join(" ", light.Select(l => l.Text)), all = string.Join(" ", colored.Select(l => l.Text));
+        int colon = all.IndexOf(':');
+        if (colon < 2 || colon > 30 || text.Contains(':')) return light;
+        string name = all[..colon].Trim(), rest = all[(colon + 1)..].Trim();
+        if (!name.All(c => char.IsLetter(c) || c is ' ' or '-' or '\'' or '.') || TextTools.Similarity(rest, text) < 0.85) return light;
+        var box = colored.Select(l => l.Box).Concat(light.Select(l => l.Box)).Aggregate(Rectangle.Union);
+        return new List<OcrLine> { new($"{name}: {text}", box) };
+    }
+
+    /// <summary>Light pixels as black on white; with colors, bright strong colors too (an orange or red name).</summary>
+    static byte[] Mask(byte[] bytes, bool colors)
+    {
+        var m = new byte[bytes.Length];
+        for (int i = 0; i < m.Length; i += 4)
+        {
+            int b = bytes[i], g = bytes[i + 1], r = bytes[i + 2];
+            int lum = (b * 29 + g * 150 + r * 77) >> 8;
+            int max = Math.Max(b, Math.Max(g, r)), min = Math.Min(b, Math.Min(g, r));
+            bool on = lum > 175 || colors && max > 230 && max - min > 150;
+            m[i] = m[i + 1] = m[i + 2] = on ? (byte)0 : (byte)255;
+            m[i + 3] = 255;
+        }
+        return m;
     }
 
     async Task<List<OcrLine>> Read(byte[] bytes, int w, int h, int scale)
