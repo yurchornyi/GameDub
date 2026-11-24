@@ -224,7 +224,8 @@ public static class TextTools
         new(@"^([\p{L}][\p{L}'’\-]*(?:\s[\p{L}][\p{L}'’\-]*)?)\s*[:：]\s*(.*)$");
     // sound and stage notes, not speech: [стонет], (взрывы), *смеётся*, ♪ музыка ♪ (owner, 24.11: «вибухи не треба озвучувати»)
     static readonly System.Text.RegularExpressions.Regex StageNote =
-        new(@"\[[^\]]*\]|\[[^\]]*$|\([^)]*\)|\([^)]*$|\*[^*]*\*|[♪♫][^♪♫]*[♪♫]?");
+        new(@"\[[^\]]*\]|\[[^\]]*$|^[^\[\]]*\]|\([^)]*\)|\([^)]*$|^[^()]*\)|\*[^*]*\*|[♪♫][^♪♫]*[♪♫]?");
+    // (the opening bracket can be lost to the reader: «А: стонет от жара]», 24.11 — so text before a lone closing one goes too)
 
     /// <summary>
     /// The box's lines, top to bottom, as what each speaker says: a line that starts with a name and a colon starts a new
@@ -247,7 +248,7 @@ public static class TextTools
             bool caps = t.Count(char.IsUpper) >= letters * 0.8, ends = ".!?…".Contains(t.TrimEnd('"', '»', '\'', ' ').LastOrDefault());
             var m = NameColon.Match(t);
             if (caps && !ends && !(m.Success && m.Groups[1].Length <= 24)) continue;
-            if (m.Success && m.Groups[1].Length <= 24)
+            if (m.Success && m.Groups[1].Length <= 24 && m.Groups[1].Value.Count(char.IsLetter) >= 2)
             {
                 var name = m.Groups[1].Value;
                 said.Add((char.ToUpperInvariant(name[0]) + name[1..], m.Groups[2].Value));
@@ -352,6 +353,16 @@ public static class TextTools
 /// </summary>
 public sealed class SubtitleTracker
 {
+    /// <summary>The same line again: the same words, by a name read the same or misread («Ейкоб: Эй.» after «Джейкоб: Эй.»).</summary>
+    static bool Same(string a, string b)
+    {
+        if (TextTools.Similarity(a, b) >= 0.8) return true;
+        int ca = a.IndexOf(':'), cb = b.IndexOf(':');
+        string na = ca > 0 ? a[..ca] : "", nb = cb > 0 ? b[..cb] : "";
+        string ba = ca > 0 ? a[(ca + 1)..] : a, bb = cb > 0 ? b[(cb + 1)..] : b;
+        return TextTools.Similarity(ba, bb) >= 0.9 && (na.Length == 0 || nb.Length == 0 || TextTools.Similarity(na, nb) >= 0.5);
+    }
+
     sealed class Seen { public string Text = ""; public int Count; public long First; public bool Done; }
     List<Seen> _seen = new();
     readonly List<(string text, long at)> _said = new();
@@ -375,7 +386,7 @@ public sealed class SubtitleTracker
             bool whole = bad == 0 && good >= 4 && end.Length > 0 && ".!?…".Contains(end[^1]);
             if (s.Count < 2 && !whole) continue;
             s.Done = true;
-            if (_said.Any(x => TextTools.Similarity(x.text, s.Text) >= 0.8)) continue;
+            if (_said.Any(x => Same(x.text, s.Text))) continue;
             _said.Add((s.Text, now));
             ready.Add((s.Text, s.First));
         }
