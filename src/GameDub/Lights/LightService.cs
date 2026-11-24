@@ -209,11 +209,17 @@ public sealed class LightService : IDisposable
     /// itself on: the police's fire kept the lights going after he stopped («я постріляв і перестав, воно далі показувало»,
     /// 18.11). Before his gun is known: 40 % of the loudest shot lately, and a burst under 1 s apart. Under _gate.
     /// </summary>
+    const double GunForgotten = 0.01;
+
     bool MyShot(long now, double strength, double loud)
     {
         var fire = _pad.RightTrigger(now, FireMs);
         bool strong = strength >= MineLoudness;
         double myGun = _myGun * Math.Pow(0.5, (now - _myGunTick) / 60_000.0);
+        // After a few minutes without shooting the halving left his gun at 0.001: a bar of nothing, so others' shots and
+        // echoes lit after his own (GTA, 23.11: «блимає з запізненням, коли я вже давно постріляв»), and the 2x cap kept it
+        // from being learned again. Under 0.01 it is forgotten: the next sure shot sets it anew.
+        if (myGun < GunForgotten) myGun = 0;
         // with both triggers held together Z stays in the middle (GTA Online, 18.11: most of the player's long bursts were
         // dark this way, «Held», as loud as the loudest): his gun's own loudness tells
         bool asMyGun = myGun > 0 && loud >= MyGunShare * myGun;
