@@ -240,6 +240,9 @@ public static class TextTools
             if (!t.Any(c => c is >= 'Ѐ' and <= 'ӿ')) t = t.Replace('|', 'I');
             int letters = t.Count(char.IsLetter);
             if (letters < 2 || letters < t.Length * 0.5) continue;
+            // a label in capitals before the subtitle on the same row («ВЕРНУТЬСЯ В ГЛАВНОЕ МЕНЮ вот мой адрес…», 24.11): cut
+            var lead = System.Text.RegularExpressions.Regex.Match(t, @"^(?:\p{Lu}+[\s'’,.:-]+){2,}(?=\p{L}*\p{Ll})");
+            if (lead.Success) { t = t[lead.Length..].Trim(); letters = t.Count(char.IsLetter); if (letters < 2) continue; }
             // a label of the game's own (ВЕРНУТЬСЯ В ГЛАВНОЕ МЕНЮ): all capitals, no name, no sentence end
             bool caps = t.Count(char.IsUpper) >= letters * 0.8, ends = ".!?…".Contains(t.TrimEnd('"', '»', '\'', ' ').LastOrDefault());
             var m = NameColon.Match(t);
