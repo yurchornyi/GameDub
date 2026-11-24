@@ -360,7 +360,8 @@ public sealed class SubtitleTracker
         int ca = a.IndexOf(':'), cb = b.IndexOf(':');
         string na = ca > 0 ? a[..ca] : "", nb = cb > 0 ? b[..cb] : "";
         string ba = ca > 0 ? a[(ca + 1)..] : a, bb = cb > 0 ? b[(cb + 1)..] : b;
-        return TextTools.Similarity(ba, bb) >= 0.9 && (na.Length == 0 || nb.Length == 0 || TextTools.Similarity(na, nb) >= 0.5);
+        // the words misread too («Блесгящэ.» after «Джелкоб: блестяще.», 24.11)
+        return TextTools.Similarity(ba, bb) >= 0.75 && (na.Length == 0 || nb.Length == 0 || TextTools.Similarity(na, nb) >= 0.5);
     }
 
     sealed class Seen { public string Text = ""; public int Count; public long First; public bool Done; }

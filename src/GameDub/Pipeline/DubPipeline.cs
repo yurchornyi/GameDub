@@ -231,7 +231,8 @@ public sealed class DubPipeline : IDisposable
             // 24.11: «тільки те, що треба»; «Налаштувати», «O BOVITWB» came from the menu)
             int words = body.Split(' ', StringSplitOptions.RemoveEmptyEntries).Count(w => w.Count(char.IsLetter) >= 2);
             string end = body.TrimEnd('"', '»', '\'', ' ');
-            bool sentence = words >= 4 || words >= 1 && end.Length > 0 && ".!?…".Contains(end[^1]);
+            // one word alone is junk as often as speech («Оаппе.» was said as «ОАПП.», 24.11): a sentence has two at least
+            bool sentence = words >= 4 || words >= 2 && end.Length > 0 && ".!?…".Contains(end[^1]);
             if (speaker == null && !sentence) { Log.Write($"not speech, not said: {body}"); return null; }
             body = TextTools.FixCaps(body);
             if (speaker != null) speaker = TextTools.FixCaps(speaker);
