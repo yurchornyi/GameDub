@@ -87,6 +87,24 @@ public sealed class GoogleTranslator : ITranslator
         if (_cache.TryGetValue(text, out var hit)) return hit;
         Exception? last = null;
         long now = Environment.TickCount64;
+        // both Google endpoints at once, the first answer wins: one of them took 0.9-1.2 s now and then (24.11)
+        if (now >= _restUntil[0] && now >= _restUntil[1])
+        {
+            using var race = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var running = new List<Task<string>> { _endpoints[0].run(text, race.Token), _endpoints[1].run(text, race.Token) };
+            while (running.Count > 0)
+            {
+                var done = await Task.WhenAny(running);
+                running.Remove(done);
+                if (done.IsCompletedSuccessfully && done.Result.Trim().Length > 0)
+                {
+                    race.Cancel();
+                    if (_cache.Count > 500) _cache.Clear();
+                    return _cache[text] = done.Result.Trim();
+                }
+            }
+            if (ct.IsCancellationRequested) ct.ThrowIfCancellationRequested();
+        }
         for (int i = 0; i < _endpoints.Length; i++)
         {
             if (now < _restUntil[i]) continue;

@@ -196,11 +196,17 @@ public sealed class DubPipeline : IDisposable
         return null;
     }
 
+    long _readTick;
+
+    /// <summary>Read again: the picture changed in one place or on the whole, or a second went by (a safety net: a new
+    /// line must never wait).</summary>
     bool Changed(Bitmap bmp)
     {
         var sig = ScreenCapture.Signature(bmp);
-        bool changed = ScreenCapture.Diff(sig, _lastSig) >= 1.0;
+        long now = Environment.TickCount64;
+        bool changed = ScreenCapture.Diff(sig, _lastSig) >= 1.0 || ScreenCapture.MaxDiff(sig, _lastSig) >= 6 || now - _readTick > 1000;
         _lastSig = sig;
+        if (changed) _readTick = now;
         return changed;
     }
 

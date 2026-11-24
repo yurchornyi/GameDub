@@ -55,6 +55,16 @@ public static class ScreenCapture
         return sig;
     }
 
+    /// <summary>The largest change of one cell: a short line in a wide band changes a few cells a lot, and the average
+    /// over all of them stayed under the bar (24.11: new subtitles in Dead Island 2 were not read at all).</summary>
+    public static int MaxDiff(byte[]? a, byte[]? b)
+    {
+        if (a == null || b == null || a.Length != b.Length) return int.MaxValue;
+        int m = 0;
+        for (int i = 0; i < a.Length; i++) m = Math.Max(m, Math.Abs(a[i] - b[i]));
+        return m;
+    }
+
     public static double Diff(byte[]? a, byte[]? b)
     {
         if (a == null || b == null || a.Length != b.Length) return double.MaxValue;
@@ -230,7 +240,10 @@ public static class TextTools
             if (!t.Any(c => c is >= 'Ѐ' and <= 'ӿ')) t = t.Replace('|', 'I');
             int letters = t.Count(char.IsLetter);
             if (letters < 2 || letters < t.Length * 0.5) continue;
+            // a label of the game's own (ВЕРНУТЬСЯ В ГЛАВНОЕ МЕНЮ): all capitals, no name, no sentence end
+            bool caps = t.Count(char.IsUpper) >= letters * 0.8, ends = ".!?…".Contains(t.TrimEnd('"', '»', '\'', ' ').LastOrDefault());
             var m = NameColon.Match(t);
+            if (caps && !ends && !(m.Success && m.Groups[1].Length <= 24)) continue;
             if (m.Success && m.Groups[1].Length <= 24)
             {
                 var name = m.Groups[1].Value;
