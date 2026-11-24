@@ -352,6 +352,16 @@ public static class TextTools
 /// </summary>
 public sealed class SubtitleTracker
 {
+    /// <summary>The same line again: the same words, by a name read the same or misread («Ейкоб: Эй.» after «Джейкоб: Эй.»).</summary>
+    static bool Same(string a, string b)
+    {
+        if (TextTools.Similarity(a, b) >= 0.8) return true;
+        int ca = a.IndexOf(':'), cb = b.IndexOf(':');
+        string na = ca > 0 ? a[..ca] : "", nb = cb > 0 ? b[..cb] : "";
+        string ba = ca > 0 ? a[(ca + 1)..] : a, bb = cb > 0 ? b[(cb + 1)..] : b;
+        return TextTools.Similarity(ba, bb) >= 0.9 && (na.Length == 0 || nb.Length == 0 || TextTools.Similarity(na, nb) >= 0.5);
+    }
+
     sealed class Seen { public string Text = ""; public int Count; public long First; public bool Done; }
     List<Seen> _seen = new();
     readonly List<(string text, long at)> _said = new();
@@ -375,7 +385,7 @@ public sealed class SubtitleTracker
             bool whole = bad == 0 && good >= 4 && end.Length > 0 && ".!?…".Contains(end[^1]);
             if (s.Count < 2 && !whole) continue;
             s.Done = true;
-            if (_said.Any(x => TextTools.Similarity(x.text, s.Text) >= 0.8)) continue;
+            if (_said.Any(x => Same(x.text, s.Text))) continue;
             _said.Add((s.Text, now));
             ready.Add((s.Text, s.First));
         }

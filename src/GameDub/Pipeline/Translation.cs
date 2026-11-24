@@ -94,32 +94,6 @@ public sealed class GoogleTranslator : ITranslator
         if (_cache.TryGetValue(text, out var hit)) return hit;
         Exception? last = null;
         long now = Environment.TickCount64;
-        // both Google endpoints at once, the first answer wins: one of them took 0.9-1.2 s now and then (24.11)
-        if (now >= _restUntil[0] && now >= _restUntil[1])
-        {
-            using var race = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var running = new List<Task<string>> { _endpoints[0].run(text, race.Token), _endpoints[1].run(text, race.Token) };
-            var which = new Dictionary<Task<string>, int> { [running[0]] = 0, [running[1]] = 1 };
-            while (running.Count > 0)
-            {
-                var done = await Task.WhenAny(running);
-                running.Remove(done);
-                if (done.IsFaulted && done.Exception?.InnerException is { } err)
-                {
-                    // a refused endpoint rests (24.11: google-chrome answered «automated queries» to the console)
-                    int k = which[done];
-                    _restUntil[k] = now + (err.Message.Contains("429") ? 3 * 60_000 : 30_000);
-                    Log.Write($"translate {_endpoints[k].name} failed: {err.Message[..Math.Min(120, err.Message.Length)]}");
-                }
-                if (done.IsCompletedSuccessfully && done.Result.Trim().Length > 0)
-                {
-                    race.Cancel();
-                    if (_cache.Count > 500) _cache.Clear();
-                    return _cache[text] = done.Result.Trim();
-                }
-            }
-            if (ct.IsCancellationRequested) ct.ThrowIfCancellationRequested();
-        }
         for (int i = 0; i < _endpoints.Length; i++)
         {
             if (now < _restUntil[i]) continue;
@@ -357,13 +331,15 @@ public sealed class HybridTranslator : ITranslator
             {
                 using var quick = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 quick.CancelAfter(TimeSpan.FromSeconds(4)); // a slow line is worse than an offline one
+                // both at once: Google's free endpoints answer the console in 1-1.5 s or refuse it (429, 24.11), the model
+                // on the console in a fraction of that. Google's words are kept when they come within 0.5 s.
                 var online = _online.TranslateAsync(text, speaker, gender, quick.Token);
-                // online late (over 1.2 s): the offline model starts too, and the first one back is said
-                if (await Task.WhenAny(online, Task.Delay(1200, ct)) == online) return await online;
                 var offline = _offline.TranslateAsync(text, speaker, gender, ct);
-                if (await Task.WhenAny(online, offline) == online && online.IsCompletedSuccessfully) return online.Result;
-                Log.Write("online translation late: the offline one said");
-                return await offline;
+                if (await Task.WhenAny(online, Task.Delay(500, ct)) == online && online.IsCompletedSuccessfully) return online.Result;
+                var first = await Task.WhenAny(online, offline);
+                if (first == online && online.IsCompletedSuccessfully) return online.Result;
+                try { return await offline; }
+                catch (Exception) when (!ct.IsCancellationRequested) { return await online; }
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
