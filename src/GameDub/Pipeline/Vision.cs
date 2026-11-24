@@ -224,7 +224,8 @@ public static class TextTools
         new(@"^([\p{L}][\p{L}'’\-]*(?:\s[\p{L}][\p{L}'’\-]*)?)\s*[:：]\s*(.*)$");
     // sound and stage notes, not speech: [стонет], (взрывы), *смеётся*, ♪ музыка ♪ (owner, 24.11: «вибухи не треба озвучувати»)
     static readonly System.Text.RegularExpressions.Regex StageNote =
-        new(@"\[[^\]]*\]|\[[^\]]*$|\([^)]*\)|\([^)]*$|\*[^*]*\*|[♪♫][^♪♫]*[♪♫]?");
+        new(@"\[[^\]]*\]|\[[^\]]*$|^[^\[\]]*\]|\([^)]*\)|\([^)]*$|^[^()]*\)|\*[^*]*\*|[♪♫][^♪♫]*[♪♫]?");
+    // (the opening bracket can be lost to the reader: «А: стонет от жара]», 24.11 — so text before a lone closing one goes too)
 
     /// <summary>
     /// The box's lines, top to bottom, as what each speaker says: a line that starts with a name and a colon starts a new
@@ -247,7 +248,7 @@ public static class TextTools
             bool caps = t.Count(char.IsUpper) >= letters * 0.8, ends = ".!?…".Contains(t.TrimEnd('"', '»', '\'', ' ').LastOrDefault());
             var m = NameColon.Match(t);
             if (caps && !ends && !(m.Success && m.Groups[1].Length <= 24)) continue;
-            if (m.Success && m.Groups[1].Length <= 24)
+            if (m.Success && m.Groups[1].Length <= 24 && m.Groups[1].Value.Count(char.IsLetter) >= 2)
             {
                 var name = m.Groups[1].Value;
                 said.Add((char.ToUpperInvariant(name[0]) + name[1..], m.Groups[2].Value));
