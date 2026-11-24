@@ -212,12 +212,14 @@ public static class TextTools
 
     static readonly System.Text.RegularExpressions.Regex NameColon =
         new(@"^([\p{L}][\p{L}'’\-]*(?:\s[\p{L}][\p{L}'’\-]*)?)\s*[:：]\s*(.*)$");
-    static readonly System.Text.RegularExpressions.Regex StageNote = new(@"\[[^\]]*\]|\[[^\]]*$");
+    // sound and stage notes, not speech: [стонет], (взрывы), *смеётся*, ♪ музыка ♪ (owner, 24.11: «вибухи не треба озвучувати»)
+    static readonly System.Text.RegularExpressions.Regex StageNote =
+        new(@"\[[^\]]*\]|\[[^\]]*$|\([^)]*\)|\([^)]*$|\*[^*]*\*|[♪♫][^♪♫]*[♪♫]?");
 
     /// <summary>
     /// The box's lines, top to bottom, as what each speaker says: a line that starts with a name and a colon starts a new
     /// one («джеикоб:» too, read without its capital), a line without one goes on the one before. Stage notes in square
-    /// brackets («[стонет]») are not said; junk lines are dropped.
+    /// brackets («[стонет]»), round brackets, asterisks or music notes are not said; junk lines are dropped.
     /// </summary>
     public static List<string> Utterances(IEnumerable<OcrLine> lines)
     {
