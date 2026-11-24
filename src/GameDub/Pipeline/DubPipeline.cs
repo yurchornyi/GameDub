@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Threading;
@@ -33,8 +34,8 @@ public sealed class DubPipeline : IDisposable
     RegionDetector _detector = new();
     CancellationTokenSource? _playCts;
     byte[]? _lastSig;
-    string _lastText = "";
-    bool _lastClean;
+    List<string> _lastLines = new();
+    long _warmTick;
     // The subtitles' language as the game shows them, not as set: the other language's recognizer reads a line that
     // looks like junk too, and when it reads it clearly better twice in a row, the game's language is switched (owner,
     // 24.11: Dead Island 2 was set to English, the game showed Russian, and «Продолжить» was said as «О нпоаой1)квіт»).
@@ -129,7 +130,11 @@ public sealed class DubPipeline : IDisposable
             return 700;
         }
 
-        var rect = _profile.Region.ToScreen(client);
+        // Read a little around the saved band: a box of three lines grows above it (Dead Island 2, 24.11: the top line of
+        // two sat on the band's edge). Text that touches the edge of what is read grows the band itself, and it is saved.
+        var band = _profile.Region.ToScreen(client);
+        var rect = Rectangle.Intersect(client, Rectangle.FromLTRB(band.Left - client.Width * 3 / 100, band.Top - band.Height,
+            band.Right + client.Width * 3 / 100, band.Bottom + band.Height / 3));
         using var bmp = ScreenCapture.Capture(rect);
         if (Changed(bmp))
         {
@@ -137,20 +142,37 @@ public sealed class DubPipeline : IDisposable
             if (read == null) return 1000;
             var (good, bad) = OcrService.Quality(read);
             // mostly junk (a menu in another script, a logo, the HUD): nothing to say
-            _lastText = bad > good ? "" : TextTools.Clean(read);
-            _lastClean = bad == 0;
+            _lastLines = bad > good ? new List<string>() : TextTools.Utterances(read);
+            if (_lastLines.Count > 0) Grow(read, rect, client);
         }
-        var line = _tracker.Push(_lastText, _lastClean);
-        if (line != null)
+        foreach (var (line, first) in _tracker.Push(_lastLines))
         {
             Log.Write($"{Game.SubLang.ToUpperInvariant()}: {line}");
-            _lines.Writer.TryWrite((line, _tracker.FirstSeen));   // timed from when it came on screen
+            _lines.Writer.TryWrite((line, first));   // timed from when it came on screen
         }
-        return _lastText.Length > 0 ? _s.OcrIntervalMs : _s.OcrIntervalMs + 200;
+        // keep the translator's connection open while the game is played: a new one cost ~1 s a line
+        if (Environment.TickCount64 - _warmTick > 45_000) { _warmTick = Environment.TickCount64; _ = Task.Run(() => _translator.WarmAsync()); }
+        return _lastLines.Count > 0 ? Math.Min(_s.OcrIntervalMs, 250) : _s.OcrIntervalMs;
+    }
+
+    /// <summary>Text on the edge of what was read: the band grows that way (up by half, or wider), at most to a third of
+    /// the screen's height.</summary>
+    void Grow(List<OcrLine> read, Rectangle rect, Rectangle client)
+    {
+        var r = _profile.Region!;
+        bool top = read.Any(l => l.Box.Top <= 3), side = read.Any(l => l.Box.Left <= 3 || l.Box.Right >= rect.Width - 3);
+        if (!(top && r.H < 0.33) && !(side && r.W < 0.98)) return;
+        var g = new RelRect { X = r.X, Y = r.Y, W = r.W, H = r.H };
+        if (top && r.H < 0.33) { g.Y -= r.H * 0.5; g.H *= 1.5; }
+        if (side && r.W < 0.98) { g.X -= 0.03; g.W += 0.06; }
+        g.Clamp();
+        lock (_profile) { _profile.Region = g; Store.SaveProfile(Game.Id, _profile); }
+        _lastSig = null;
+        Log.Write($"region grown (text on its {(top ? "top" : "side")}): x={g.X:F2} y={g.Y:F2} w={g.W:F2} h={g.H:F2}");
     }
 
     /// <summary>The subtitles read; null once the other language turned out to be the game's (the pipeline restarts).</summary>
-    async Task<System.Collections.Generic.List<OcrLine>?> Read(OcrService ocr, Bitmap bmp)
+    async Task<List<OcrLine>?> Read(OcrService ocr, Bitmap bmp)
     {
         var lines = await ocr.RecognizeAsync(bmp);
         if (_other == null) return lines;
@@ -191,6 +213,13 @@ public sealed class DubPipeline : IDisposable
                 long waited = Environment.TickCount64 - at;
                 if (waited > StaleMs) { Log.Write($"skip stale ({waited / 1000.0:F1}s): {line}"); continue; }
                 var (speaker, body) = Speakers.Split(line);
+                if (body.Count(char.IsLetter) < 2) continue;
+                // only speech: a line with a speaker, or a sentence; a menu item, a hint or a label is not said (owner,
+                // 24.11: «тільки те, що треба»; «Налаштувати», «O BOVITWB» came from the menu)
+                int words = body.Split(' ', StringSplitOptions.RemoveEmptyEntries).Count(w => w.Count(char.IsLetter) >= 2);
+                string end = body.TrimEnd('"', '»', '\'', ' ');
+                bool sentence = words >= 4 || words >= 2 && end.Length > 0 && ".!?…".Contains(end[^1]);
+                if (speaker == null && !sentence) { Log.Write($"not speech, not said: {body}"); continue; }
                 body = TextTools.FixCaps(body);
                 if (speaker != null) speaker = TextTools.FixCaps(speaker);
                 var (gender, variant) = VoiceFor(speaker);
@@ -224,6 +253,9 @@ public sealed class DubPipeline : IDisposable
         if (speaker == null) return (_s.NarratorGender, 0);
         lock (_profile)
         {
+            // a misread name («Джеикоб» for «Джейкоб») is the same speaker
+            var known = _profile.Speakers.Keys.FirstOrDefault(k => TextTools.Similarity(k, speaker) >= 0.75);
+            if (known != null) speaker = known;
             if (!_profile.Speakers.TryGetValue(speaker, out var info))
             {
                 var gender = Speakers.GuessGender(speaker);

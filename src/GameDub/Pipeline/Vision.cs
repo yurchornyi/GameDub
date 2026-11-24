@@ -210,6 +210,46 @@ public static class TextTools
         return s.TrimStart('-', '–', '—', '.', ',', '\'', '"', ' ', '_', '~', '*');
     }
 
+    static readonly System.Text.RegularExpressions.Regex NameColon =
+        new(@"^([\p{L}][\p{L}'’\-]*(?:\s[\p{L}][\p{L}'’\-]*)?)\s*[:：]\s*(.*)$");
+    // sound and stage notes, not speech: [стонет], (взрывы), *смеётся*, ♪ музыка ♪ (owner, 24.11: «вибухи не треба озвучувати»)
+    static readonly System.Text.RegularExpressions.Regex StageNote =
+        new(@"\[[^\]]*\]|\[[^\]]*$|\([^)]*\)|\([^)]*$|\*[^*]*\*|[♪♫][^♪♫]*[♪♫]?");
+
+    /// <summary>
+    /// The box's lines, top to bottom, as what each speaker says: a line that starts with a name and a colon starts a new
+    /// one («джеикоб:» too, read without its capital), a line without one goes on the one before. Stage notes in square
+    /// brackets («[стонет]»), round brackets, asterisks or music notes are not said; junk lines are dropped.
+    /// </summary>
+    public static List<string> Utterances(IEnumerable<OcrLine> lines)
+    {
+        var said = new List<(string? name, string text)>();
+        foreach (var l in lines.OrderBy(l => l.Box.Top))
+        {
+            var t = FixLookalikes(l.Text.Replace('’', '\'').Replace('“', '"').Replace('”', '"').Trim());
+            if (!t.Any(c => c is >= 'Ѐ' and <= 'ӿ')) t = t.Replace('|', 'I');
+            int letters = t.Count(char.IsLetter);
+            if (letters < 2 || letters < t.Length * 0.5) continue;
+            var m = NameColon.Match(t);
+            if (m.Success && m.Groups[1].Length <= 24)
+            {
+                var name = m.Groups[1].Value;
+                said.Add((char.ToUpperInvariant(name[0]) + name[1..], m.Groups[2].Value));
+            }
+            else if (said.Count > 0) said[^1] = (said[^1].name, said[^1].text + " " + t);
+            else said.Add((null, t));
+        }
+        var result = new List<string>();
+        foreach (var (name, text) in said)
+        {
+            var body = System.Text.RegularExpressions.Regex.Replace(StageNote.Replace(text, " "), @"\s+", " ").Trim()
+                .TrimStart('-', '–', '—', '.', ',', '\'', '"', ' ', '_', '~', '*');
+            if (body.Count(char.IsLetter) < 2) continue;
+            result.Add(name != null ? $"{name}: {body}" : body);
+        }
+        return result;
+    }
+
     const string Latin = "ABCEHKMOPTXaceopxy", Cyrillic = "АВСЕНКМОРТХасеорху";
 
     /// <summary>The Russian engine writes Latin letters that look Cyrillic inside Cyrillic words («Bce» for «Все»), and
@@ -288,38 +328,43 @@ public static class TextTools
 /// Emits a subtitle once it has been read identically twice in a row (filters typewriter
 /// animations and OCR flicker) and was not spoken already.
 /// </summary>
+/// <summary>
+/// Which lines on screen are new and settled enough to say. A subtitle box holds several lines, often from different
+/// speakers («Джошуа: [стонет]» over «Джейкоб: Кто там?», Dead Island 2), and a new line joins the ones already shown:
+/// each is said once, when it was read the same twice, or at once when it is a whole clean sentence (ends with . ! ? …).
+/// A line said within the last 30 s is not said again.
+/// </summary>
 public sealed class SubtitleTracker
 {
-    string _candidate = "";
-    int _seen;
-    string _spoken = "";
-    long _lastTextAt, _candidateAt;
+    sealed class Seen { public string Text = ""; public int Count; public long First; public bool Done; }
+    List<Seen> _seen = new();
+    readonly List<(string text, long at)> _said = new();
 
-    /// <summary>When the line last returned was first seen on screen (TickCount64).</summary>
-    public long FirstSeen { get; private set; }
-
-    /// <summary>
-    /// A line is said once it was read the same twice, or at once when it is a whole clean sentence (ends with . ! ? …):
-    /// a second read waited ~0.5 s for nothing (owner, 24.11: «чого таким запізненням»).
-    /// </summary>
-    public string? Push(string text, bool clean = false)
+    public List<(string text, long firstSeen)> Push(IReadOnlyList<string> lines)
     {
         long now = Environment.TickCount64;
-        if (text.Length == 0)
+        var ready = new List<(string, long)>();
+        var next = new List<Seen>();
+        _said.RemoveAll(x => now - x.at > 30_000);
+        foreach (var line in lines)
         {
-            _candidate = ""; _seen = 0;
-            if (now - _lastTextAt > 8000) _spoken = ""; // allow an identical line again after a long gap
-            return null;
+            var s = _seen.FirstOrDefault(x => !next.Contains(x) && TextTools.Similarity(x.Text, line) >= 0.85);
+            if (s == null) s = new Seen { Text = line, First = now };
+            else if (line.Length > s.Text.Length) s.Text = line;
+            s.Count++;
+            next.Add(s);
+            if (s.Done) continue;
+            var (good, bad) = OcrService.Quality(new[] { new OcrLine(line, Rectangle.Empty) });
+            string end = line.TrimEnd('"', '»', '\'', ' ');
+            bool whole = bad == 0 && good >= 4 && end.Length > 0 && ".!?…".Contains(end[^1]);
+            if (s.Count < 2 && !whole) continue;
+            s.Done = true;
+            if (_said.Any(x => TextTools.Similarity(x.text, s.Text) >= 0.8)) continue;
+            _said.Add((s.Text, now));
+            ready.Add((s.Text, s.First));
         }
-        _lastTextAt = now;
-        if (TextTools.Similarity(text, _candidate) >= 0.85) _seen++;
-        else { _candidate = text; _seen = 1; _candidateAt = now; }
-
-        bool whole = _seen == 1 && clean && text.TrimEnd('"', '»', '\'', ' ').Length > 0 && ".!?…".Contains(text.TrimEnd('"', '»', '\'', ' ')[^1]);
-        if ((_seen != 2 && !whole) || TextTools.Similarity(_candidate, _spoken) >= 0.8) return null;
-        _spoken = _candidate;
-        FirstSeen = _candidateAt;
-        return _candidate;
+        _seen = next;   // a line gone from the screen is forgotten
+        return ready;
     }
 }
 

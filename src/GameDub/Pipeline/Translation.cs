@@ -15,12 +15,38 @@ public sealed record Translation(string Text, string? Mood = null, bool Offline 
 
 public interface ITranslator
 {
+    /// <summary>Keeps the connection to the translator open (a cheap request); nothing for an offline one.</summary>
+    Task WarmAsync() => Task.CompletedTask;
+
     Task<Translation> TranslateAsync(string text, string? speaker, string gender, CancellationToken ct);
 }
 
 public static class Http
 {
-    public static readonly HttpClient Client = new() { Timeout = TimeSpan.FromSeconds(15) };
+    // Connections stay open 10 min and IPv4 goes first: on the console a line's translation took 1.5-1.9 s while the
+    // same request from curl took 0.2-0.4 s (24.11), the time of a new connection each line.
+    public static readonly HttpClient Client = new(new SocketsHttpHandler
+    {
+        PooledConnectionIdleTimeout = TimeSpan.FromMinutes(10),
+        ConnectCallback = async (ctx, ct) =>
+        {
+            var addrs = await System.Net.Dns.GetHostAddressesAsync(ctx.DnsEndPoint.Host, ct);
+            Exception? last = null;
+            foreach (var a in addrs.OrderBy(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 ? 1 : 0))
+            {
+                var sock = new System.Net.Sockets.Socket(a.AddressFamily, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp) { NoDelay = true };
+                try
+                {
+                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    cts.CancelAfter(3000);
+                    await sock.ConnectAsync(a, ctx.DnsEndPoint.Port, cts.Token);
+                    return new System.Net.Sockets.NetworkStream(sock, true);
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested) { last = ex; sock.Dispose(); }
+            }
+            throw last ?? new HttpRequestException($"no address for {ctx.DnsEndPoint.Host}");
+        },
+    }) { Timeout = TimeSpan.FromSeconds(15) };
 }
 
 /// <summary>
@@ -51,6 +77,11 @@ public sealed class GoogleTranslator : ITranslator
     public async Task<Translation> TranslateAsync(string text, string? speaker, string gender, CancellationToken ct) =>
         new(await TranslateAsync(text, ct));
 
+    public async Task WarmAsync()
+    {
+        try { await GoogleChrome(_from == "ru" ? "да" : "ok", CancellationToken.None); } catch { }
+    }
+
     public async Task<string> TranslateAsync(string text, CancellationToken ct)
     {
         if (_cache.TryGetValue(text, out var hit)) return hit;
@@ -61,7 +92,10 @@ public sealed class GoogleTranslator : ITranslator
             if (now < _restUntil[i]) continue;
             try
             {
+                long t0 = Environment.TickCount64;
                 var res = (await _endpoints[i].run(text, ct)).Trim();
+                long ms = Environment.TickCount64 - t0;
+                if (ms > 800) Log.Write($"translate {_endpoints[i].name} slow: {ms} ms");
                 if (res.Length == 0) throw new InvalidOperationException("empty translation");
                 if (_cache.Count > 500) _cache.Clear();
                 return _cache[text] = res;
@@ -271,6 +305,17 @@ public sealed class HybridTranslator : ITranslator
 
     public HybridTranslator(ITranslator online, ITranslator offline) { _online = online; _offline = offline; }
 
+    bool _offlineWarm;
+
+    /// <summary>The online connection kept open; the offline model loaded once (~1.2 s), so it is ready to stand in.</summary>
+    public async Task WarmAsync()
+    {
+        await _online.WarmAsync();
+        if (_offlineWarm) return;
+        _offlineWarm = true;
+        try { await _offline.TranslateAsync("да", null, "m", CancellationToken.None); } catch { }
+    }
+
     public async Task<Translation> TranslateAsync(string text, string? speaker, string gender, CancellationToken ct)
     {
         if (Environment.TickCount64 >= _offlineUntil && System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable())
@@ -279,7 +324,13 @@ public sealed class HybridTranslator : ITranslator
             {
                 using var quick = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 quick.CancelAfter(TimeSpan.FromSeconds(4)); // a slow line is worse than an offline one
-                return await _online.TranslateAsync(text, speaker, gender, quick.Token);
+                var online = _online.TranslateAsync(text, speaker, gender, quick.Token);
+                // online late (over 1.2 s): the offline model starts too, and the first one back is said
+                if (await Task.WhenAny(online, Task.Delay(1200, ct)) == online) return await online;
+                var offline = _offline.TranslateAsync(text, speaker, gender, ct);
+                if (await Task.WhenAny(online, offline) == online && online.IsCompletedSuccessfully) return online.Result;
+                Log.Write("online translation late: the offline one said");
+                return await offline;
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
