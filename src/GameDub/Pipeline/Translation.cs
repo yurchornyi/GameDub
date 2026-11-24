@@ -331,13 +331,14 @@ public sealed class HybridTranslator : ITranslator
             {
                 using var quick = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 quick.CancelAfter(TimeSpan.FromSeconds(4)); // a slow line is worse than an offline one
-                // both at once: Google's free endpoints answer the console in 1-1.5 s or refuse it (429, 24.11), the model
-                // on the console in a fraction of that. Google's words are kept when they come within 0.5 s.
+                // Google first: its words are better (the model on the console said «ковчег» for «золотце»), and the owner
+                // chose quality over half a second (24.11). The model starts beside it, so when Google is not back within
+                // 2.5 s or refuses (429), its translation is ready at once.
                 var online = _online.TranslateAsync(text, speaker, gender, quick.Token);
                 var offline = _offline.TranslateAsync(text, speaker, gender, ct);
-                if (await Task.WhenAny(online, Task.Delay(500, ct)) == online && online.IsCompletedSuccessfully) return online.Result;
-                var first = await Task.WhenAny(online, offline);
-                if (first == online && online.IsCompletedSuccessfully) return online.Result;
+                await Task.WhenAny(online, Task.Delay(2500, ct));
+                if (online.IsCompletedSuccessfully) return online.Result;
+                if (!online.IsCompleted) Log.Write("online translation late (2.5 s): the offline one said");
                 try { return await offline; }
                 catch (Exception) when (!ct.IsCancellationRequested) { return await online; }
             }
