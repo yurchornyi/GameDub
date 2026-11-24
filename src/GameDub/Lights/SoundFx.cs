@@ -146,7 +146,9 @@ public sealed class SoundFx : IDisposable
     // sudden sounds over a minute, for the log
     int _cutsMade, _judged, _late, _fast, _shots, _impacts; double _clipGun, _clipImpact, _judgeMs;
     readonly Dictionary<string, int> _clipTops = new();
-    long _lastEffectTick, _sirenOnUntil, _shotLogTick; int _shotsSinceLog; long _sirenHitTick, _sirenLogTick;
+    long _lastEffectTick, _sirenOnUntil, _shotLogTick; int _shotsSinceLog; long _sirenLogTick;
+    readonly Queue<long> _sirenHits = new();
+    const int SirenLooks = 3, SirenWindowMs = 3000;
     readonly long[] _lastHeard = new long[Enum.GetValues<SoundKind>().Length];
     // what was heard, for the log: strongest effect scores and the loudest top class over a minute
     double _sumImpact, _sumGun, _sumSiren, _sumHorn; string _top = ""; double _topScore; int _hops; long _statTick;
@@ -655,17 +657,21 @@ public sealed class SoundFx : IDisposable
             // a siren and a horn fire every look while they last: their lights follow the sound
             // a siren: two looks within 1.5 s to start (an alarm beeps on and off), then on while heard within 2.5 s, so it
             // neither flickers nor starts on a blip
+            // three looks within 3 s: a real siren or alarm goes on for seconds, while two looks half a second apart (0.64,
+            // 0.32) lit the police lights in Dead Island 2 on a scream (owner, 24.11: «блималка поліції, якщо її не було»)
             if (siren >= sirenStart)
             {
-                if (now - _sirenHitTick <= 2000) _sirenOnUntil = now + 2500;
+                _sirenHits.Enqueue(now);
+                while (_sirenHits.Count > 0 && now - _sirenHits.Peek() > SirenWindowMs) _sirenHits.Dequeue();
+                if (_sirenHits.Count >= SirenLooks) _sirenOnUntil = now + 2500;
+                else if (now < _sirenOnUntil) { }
                 else if (now - _sirenLogTick > 5000)
                 {
                     int best = _siren[0]; double bestScore = 0;
                     for (int f = 0; f < frames; f++) foreach (var i in _siren) if (scores[f, i] > bestScore) { bestScore = scores[f, i]; best = i; }
-                    Log.Write($"soundfx: siren heard once, {siren:F2} («{_names[best]}»), waiting for a second look");
+                    Log.Write($"soundfx: siren heard {_sirenHits.Count} of {SirenLooks} times, {siren:F2} («{_names[best]}»), waiting");
                     _sirenLogTick = now;
                 }
-                _sirenHitTick = now;
             }
             if (siren >= SirenKeep && now < _sirenOnUntil) _sirenOnUntil = now + 2500;
             if (now < _sirenOnUntil) Fire(SoundKind.Siren, Math.Max(siren, SirenScore), SirenScore, now);
