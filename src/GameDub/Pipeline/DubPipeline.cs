@@ -234,6 +234,12 @@ public sealed class DubPipeline : IDisposable
             // one word alone is junk as often as speech («Оаппе.» was said as «ОАПП.», 24.11): a sentence has two at least
             bool sentence = words >= 4 || words >= 2 && end.Length > 0 && ".!?…".Contains(end[^1]);
             if (speaker == null && !sentence) { Log.Write($"not speech, not said: {body}"); return null; }
+            // a game that names who speaks (three names known) shows nameless lines only as its own notices and stats
+            // («Новий предмет в інвентарі…», «скорость … прочность», Dead Island 2, 24.11): those are not said
+            int named; lock (_profile) named = _profile.Speakers.Count;
+            if (speaker == null && named >= 3) { Log.Write($"no speaker in a game that names them, not said: {body}"); return null; }
+            // already Ukrainian (a notice of Windows or the game in the console's language): nothing to translate or say
+            if (body.Any(c => "іїєґІЇЄҐ".Contains(c))) { Log.Write($"already Ukrainian, not said: {body}"); return null; }
             body = TextTools.FixCaps(body);
             if (speaker != null) speaker = TextTools.FixCaps(speaker);
             var (gender, variant) = VoiceFor(speaker);
