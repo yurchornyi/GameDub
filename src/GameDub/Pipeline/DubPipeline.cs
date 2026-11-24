@@ -26,7 +26,9 @@ public sealed class DubPipeline : IDisposable
     readonly CancellationTokenSource _cts = new();
     // Items carry the tick they were queued at, so stale ones can be skipped instead of played late.
     readonly Channel<(string text, long at)> _lines = Channel.CreateBounded<(string, long)>(new BoundedChannelOptions(4) { FullMode = BoundedChannelFullMode.DropOldest });
-    readonly Channel<(byte[] audio, long at, string timing)> _audio = Channel.CreateBounded<(byte[], long, string)>(new BoundedChannelOptions(3) { FullMode = BoundedChannelFullMode.DropOldest });
+    // each line is translated and voiced as soon as it is read, beside the others; they are played in their order
+    // (one after another a quick dialogue waited ~1 s a line for the lines before it, 24.11)
+    readonly Channel<Task<(byte[] audio, long at, string timing)?>> _audio = Channel.CreateBounded<Task<(byte[], long, string)?>>(new BoundedChannelOptions(4) { FullMode = BoundedChannelFullMode.DropOldest });
     const int StaleMs = 8000;
     readonly ITranslator _translator;
     readonly ITtsEngine _tts;
@@ -213,45 +215,49 @@ public sealed class DubPipeline : IDisposable
     async Task SpeakLoop(CancellationToken ct)
     {
         await foreach (var (line, at) in _lines.Reader.ReadAllAsync(ct))
+            _audio.Writer.TryWrite(Prepare(line, at, ct));
+    }
+
+    /// <summary>One line translated and voiced; null when it is not to be said.</summary>
+    async Task<(byte[] audio, long at, string timing)?> Prepare(string line, long at, CancellationToken ct)
+    {
+        try
         {
-            try
+            long waited = Environment.TickCount64 - at;
+            if (waited > StaleMs) { Log.Write($"skip stale ({waited / 1000.0:F1}s): {line}"); return null; }
+            var (speaker, body) = Speakers.Split(line);
+            if (body.Count(char.IsLetter) < 2) return null;
+            // only speech: a line with a speaker, or a sentence; a menu item, a hint or a label is not said (owner,
+            // 24.11: «тільки те, що треба»; «Налаштувати», «O BOVITWB» came from the menu)
+            int words = body.Split(' ', StringSplitOptions.RemoveEmptyEntries).Count(w => w.Count(char.IsLetter) >= 2);
+            string end = body.TrimEnd('"', '»', '\'', ' ');
+            bool sentence = words >= 4 || words >= 1 && end.Length > 0 && ".!?…".Contains(end[^1]);
+            if (speaker == null && !sentence) { Log.Write($"not speech, not said: {body}"); return null; }
+            body = TextTools.FixCaps(body);
+            if (speaker != null) speaker = TextTools.FixCaps(speaker);
+            var (gender, variant) = VoiceFor(speaker);
+            long t1 = Environment.TickCount64;
+            var tr = await _translator.TranslateAsync(body, speaker, gender, ct);
+            long t2 = Environment.TickCount64;
+            if (tr.Text.Length == 0 || Paused) return null;
+            // a translator gives back what it cannot read (junk from the screen) as it came: no Ukrainian letter, so
+            // nothing is said, instead of English or junk in a Ukrainian voice (owner, 23.11)
+            if (!tr.Text.Any(c => c is >= 'Ѐ' and <= 'ӿ') || TextTools.Similarity(tr.Text, body) > 0.97)
             {
-                long waited = Environment.TickCount64 - at;
-                if (waited > StaleMs) { Log.Write($"skip stale ({waited / 1000.0:F1}s): {line}"); continue; }
-                var (speaker, body) = Speakers.Split(line);
-                if (body.Count(char.IsLetter) < 2) continue;
-                // only speech: a line with a speaker, or a sentence; a menu item, a hint or a label is not said (owner,
-                // 24.11: «тільки те, що треба»; «Налаштувати», «O BOVITWB» came from the menu)
-                int words = body.Split(' ', StringSplitOptions.RemoveEmptyEntries).Count(w => w.Count(char.IsLetter) >= 2);
-                string end = body.TrimEnd('"', '»', '\'', ' ');
-                bool sentence = words >= 4 || words >= 2 && end.Length > 0 && ".!?…".Contains(end[^1]);
-                if (speaker == null && !sentence) { Log.Write($"not speech, not said: {body}"); continue; }
-                body = TextTools.FixCaps(body);
-                if (speaker != null) speaker = TextTools.FixCaps(speaker);
-                var (gender, variant) = VoiceFor(speaker);
-                long t1 = Environment.TickCount64;
-                var tr = await _translator.TranslateAsync(body, speaker, gender, ct);
-                long t2 = Environment.TickCount64;
-                if (tr.Text.Length == 0 || Paused) continue;
-                // a translator gives back what it cannot read (junk from the screen) as it came: no Ukrainian letter, so
-                // nothing is said, instead of English or junk in a Ukrainian voice (owner, 23.11)
-                if (!tr.Text.Any(c => c is >= 'Ѐ' and <= 'ӿ') || TextTools.Similarity(tr.Text, body) > 0.97)
-                {
-                    Log.Write($"not translated, not said: {body} → {tr.Text}");
-                    continue;
-                }
-                // Behind the game? Speak a little faster: +8% per queued item, up to +20%.
-                int backlog = _lines.Reader.Count + _audio.Reader.Count + (waited > 2500 ? 1 : 0);
-                double pace = 1 + Math.Min(0.20, backlog * 0.08);
-                var req = new TtsRequest(tr.Text, gender, variant, tr.Mood, pace);
-                Log.Write($"UK{(tr.Offline ? " (offline)" : "")} [{speaker ?? "narrator"} → {_tts.Describe(req)}{(tr.Mood != null ? ", " + tr.Mood : "")}{(pace > 1 ? $", x{pace:F2}" : "")}]: {tr.Text}");
-                var mp3 = await _tts.SynthesizeAsync(req, ct);
-                long t3 = Environment.TickCount64;
-                _audio.Writer.TryWrite((mp3, at, $"read {(t1 - at) / 1000.0:F1} s, translated {(t2 - t1) / 1000.0:F1} s, voiced {(t3 - t2) / 1000.0:F1} s"));
+                Log.Write($"not translated, not said: {body} → {tr.Text}");
+                return null;
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-            catch (Exception ex) { Log.Error("speak", ex); }
+            // Behind the game? Speak a little faster: +8% per queued item, up to +20%.
+            int backlog = _lines.Reader.Count + _audio.Reader.Count + (Environment.TickCount64 - at > 2500 ? 1 : 0);
+            double pace = 1 + Math.Min(0.20, backlog * 0.08);
+            var req = new TtsRequest(tr.Text, gender, variant, tr.Mood, pace);
+            Log.Write($"UK{(tr.Offline ? " (offline)" : "")} [{speaker ?? "narrator"} → {_tts.Describe(req)}{(tr.Mood != null ? ", " + tr.Mood : "")}{(pace > 1 ? $", x{pace:F2}" : "")}]: {tr.Text}");
+            var mp3 = await _tts.SynthesizeAsync(req, ct);
+            long t3 = Environment.TickCount64;
+            return (mp3, at, $"read {(t1 - at) / 1000.0:F1} s, translated {(t2 - t1) / 1000.0:F1} s, voiced {(t3 - t2) / 1000.0:F1} s");
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return null; }
+        catch (Exception ex) { Log.Error("speak", ex); return null; }
     }
 
     (string gender, int variant) VoiceFor(string? speaker)
@@ -277,9 +283,10 @@ public sealed class DubPipeline : IDisposable
 
     async Task PlayLoop(CancellationToken ct)
     {
-        await foreach (var (mp3, at, timing) in _audio.Reader.ReadAllAsync(ct))
+        await foreach (var job in _audio.Reader.ReadAllAsync(ct))
         {
-            if (Paused) continue;
+            if (await job is not { } ready || Paused) continue;
+            var (mp3, at, timing) = ready;
             long waited = Environment.TickCount64 - at;
             if (waited > StaleMs + 4000) { Log.Write($"skip stale audio ({waited / 1000.0:F1}s)"); continue; }
             // from the line on screen to its voice: where the time went

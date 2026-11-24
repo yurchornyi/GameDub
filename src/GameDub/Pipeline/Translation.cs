@@ -79,7 +79,14 @@ public sealed class GoogleTranslator : ITranslator
 
     public async Task WarmAsync()
     {
-        try { await GoogleChrome(_from == "ru" ? "да" : "ok", CancellationToken.None); } catch { }
+        // the endpoint that is not resting: a refused one is not kept warm (that keeps it refused)
+        long now = Environment.TickCount64;
+        try
+        {
+            if (now >= _restUntil[1]) await GoogleGtx(_from == "ru" ? "да" : "ok", CancellationToken.None);
+            else if (now >= _restUntil[0]) await GoogleChrome(_from == "ru" ? "да" : "ok", CancellationToken.None);
+        }
+        catch { }
     }
 
     public async Task<string> TranslateAsync(string text, CancellationToken ct)
@@ -92,10 +99,18 @@ public sealed class GoogleTranslator : ITranslator
         {
             using var race = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var running = new List<Task<string>> { _endpoints[0].run(text, race.Token), _endpoints[1].run(text, race.Token) };
+            var which = new Dictionary<Task<string>, int> { [running[0]] = 0, [running[1]] = 1 };
             while (running.Count > 0)
             {
                 var done = await Task.WhenAny(running);
                 running.Remove(done);
+                if (done.IsFaulted && done.Exception?.InnerException is { } err)
+                {
+                    // a refused endpoint rests (24.11: google-chrome answered «automated queries» to the console)
+                    int k = which[done];
+                    _restUntil[k] = now + (err.Message.Contains("429") ? 3 * 60_000 : 30_000);
+                    Log.Write($"translate {_endpoints[k].name} failed: {err.Message[..Math.Min(120, err.Message.Length)]}");
+                }
                 if (done.IsCompletedSuccessfully && done.Result.Trim().Length > 0)
                 {
                     race.Cancel();
