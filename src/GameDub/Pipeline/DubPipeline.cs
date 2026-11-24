@@ -34,6 +34,13 @@ public sealed class DubPipeline : IDisposable
     CancellationTokenSource? _playCts;
     byte[]? _lastSig;
     string _lastText = "";
+    // The subtitles' language as the game shows them, not as set: the other language's recognizer reads a line that
+    // looks like junk too, and when it reads it clearly better twice in a row, the game's language is switched (owner,
+    // 24.11: Dead Island 2 was set to English, the game showed Russian, and «Продолжить» was said as «О нпоаой1)квіт»).
+    OcrService? _other;
+    string _otherLang = "";
+    int _otherWins;
+    volatile bool _switched;
 
     public DubPipeline(GameEntry game, AppSettings s, Func<IntPtr> window, Action<string> osd)
     {
@@ -82,6 +89,9 @@ public sealed class DubPipeline : IDisposable
         OcrService ocr;
         try { ocr = new OcrService(Game.SubLang); }
         catch (Exception ex) { Log.Error("ocr init", ex); _osd("GameDub: OCR недоступний"); return; }
+        _otherLang = Game.SubLang == "ru" ? "en" : "ru";
+        try { if (OcrService.IsAvailable(_otherLang)) _other = new OcrService(_otherLang); }
+        catch (Exception ex) { Log.Error("ocr init (other language)", ex); }
 
         while (!ct.IsCancellationRequested)
         {
@@ -94,7 +104,7 @@ public sealed class DubPipeline : IDisposable
 
     async Task<int> Step(OcrService ocr)
     {
-        if (Paused || Editing) return 300;
+        if (Paused || Editing || _switched) return 300;
         var hwnd = _window();
         if (hwnd == IntPtr.Zero || Native.IsIconic(hwnd) || Native.GetForegroundWindow() != hwnd) { _lastSig = null; return 1000; }
         var client = Native.GetClientScreenRect(hwnd);
@@ -106,7 +116,9 @@ public sealed class DubPipeline : IDisposable
             using var shot = ScreenCapture.Capture(area);
             // A static subtitle must still be confirmed by a second read, so keep reading while a hit is pending.
             if (!Changed(shot) && !_detector.HasHits) return 1000;
-            var found = _detector.Feed(await ocr.RecognizeAsync(shot), client);
+            var read = await Read(ocr, shot);
+            if (read == null) return 1000;
+            var found = _detector.Feed(read, client);
             if (found != null)
             {
                 SetRegion(found);
@@ -118,7 +130,14 @@ public sealed class DubPipeline : IDisposable
 
         var rect = _profile.Region.ToScreen(client);
         using var bmp = ScreenCapture.Capture(rect);
-        if (Changed(bmp)) _lastText = TextTools.Clean(await ocr.RecognizeAsync(bmp));
+        if (Changed(bmp))
+        {
+            var read = await Read(ocr, bmp);
+            if (read == null) return 1000;
+            var (good, bad) = OcrService.Quality(read);
+            // mostly junk (a menu in another script, a logo, the HUD): nothing to say
+            _lastText = bad > good ? "" : TextTools.Clean(read);
+        }
         var line = _tracker.Push(_lastText);
         if (line != null)
         {
@@ -126,6 +145,31 @@ public sealed class DubPipeline : IDisposable
             _lines.Writer.TryWrite((line, Environment.TickCount64));
         }
         return _lastText.Length > 0 ? _s.OcrIntervalMs : _s.OcrIntervalMs + 200;
+    }
+
+    /// <summary>The subtitles read; null once the other language turned out to be the game's (the pipeline restarts).</summary>
+    async Task<System.Collections.Generic.List<OcrLine>?> Read(OcrService ocr, Bitmap bmp)
+    {
+        var lines = await ocr.RecognizeAsync(bmp);
+        if (_other == null) return lines;
+        var (good, bad) = OcrService.Quality(lines);
+        if (bad == 0 || bad * 2 < good) { _otherWins = 0; return lines; }
+        var alt = await _other.RecognizeAsync(bmp);
+        var (good2, bad2) = OcrService.Quality(alt);
+        if (good2 - 2 * bad2 <= good - 2 * bad + 3) { _otherWins = 0; return lines; }
+        Log.Write($"subtitles read better as {_otherLang}: «{string.Join(" ", alt.Select(l => l.Text))}» than as {Game.SubLang}: «{string.Join(" ", lines.Select(l => l.Text))}»");
+        if (++_otherWins < 2) return alt.Count > 0 ? new System.Collections.Generic.List<OcrLine>() : lines;
+        _switched = true;
+        try
+        {
+            var games = Store.LoadGames();
+            var g = games.FirstOrDefault(x => x.Id == Game.Id);
+            if (g != null) { g.SubLang = _otherLang; Store.SaveGames(games); }
+            Log.Write($"subtitles of {Game.Name} are {_otherLang}, not {Game.SubLang}: switched");
+            _osd(_otherLang == "ru" ? "GameDub: субтитри російські — перемкнув" : "GameDub: субтитри англійські — перемкнув");
+        }
+        catch (Exception ex) { Log.Error("switch subtitle language", ex); }
+        return null;
     }
 
     bool Changed(Bitmap bmp)
