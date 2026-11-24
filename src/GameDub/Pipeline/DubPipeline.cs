@@ -25,7 +25,7 @@ public sealed class DubPipeline : IDisposable
     readonly CancellationTokenSource _cts = new();
     // Items carry the tick they were queued at, so stale ones can be skipped instead of played late.
     readonly Channel<(string text, long at)> _lines = Channel.CreateBounded<(string, long)>(new BoundedChannelOptions(4) { FullMode = BoundedChannelFullMode.DropOldest });
-    readonly Channel<(byte[] audio, long at)> _audio = Channel.CreateBounded<(byte[], long)>(new BoundedChannelOptions(3) { FullMode = BoundedChannelFullMode.DropOldest });
+    readonly Channel<(byte[] audio, long at, string timing)> _audio = Channel.CreateBounded<(byte[], long, string)>(new BoundedChannelOptions(3) { FullMode = BoundedChannelFullMode.DropOldest });
     const int StaleMs = 8000;
     readonly ITranslator _translator;
     readonly ITtsEngine _tts;
@@ -34,6 +34,7 @@ public sealed class DubPipeline : IDisposable
     CancellationTokenSource? _playCts;
     byte[]? _lastSig;
     string _lastText = "";
+    bool _lastClean;
     // The subtitles' language as the game shows them, not as set: the other language's recognizer reads a line that
     // looks like junk too, and when it reads it clearly better twice in a row, the game's language is switched (owner,
     // 24.11: Dead Island 2 was set to English, the game showed Russian, and «Продолжить» was said as «О нпоаой1)квіт»).
@@ -137,12 +138,13 @@ public sealed class DubPipeline : IDisposable
             var (good, bad) = OcrService.Quality(read);
             // mostly junk (a menu in another script, a logo, the HUD): nothing to say
             _lastText = bad > good ? "" : TextTools.Clean(read);
+            _lastClean = bad == 0;
         }
-        var line = _tracker.Push(_lastText);
+        var line = _tracker.Push(_lastText, _lastClean);
         if (line != null)
         {
             Log.Write($"{Game.SubLang.ToUpperInvariant()}: {line}");
-            _lines.Writer.TryWrite((line, Environment.TickCount64));
+            _lines.Writer.TryWrite((line, _tracker.FirstSeen));   // timed from when it came on screen
         }
         return _lastText.Length > 0 ? _s.OcrIntervalMs : _s.OcrIntervalMs + 200;
     }
@@ -192,7 +194,9 @@ public sealed class DubPipeline : IDisposable
                 body = TextTools.FixCaps(body);
                 if (speaker != null) speaker = TextTools.FixCaps(speaker);
                 var (gender, variant) = VoiceFor(speaker);
+                long t1 = Environment.TickCount64;
                 var tr = await _translator.TranslateAsync(body, speaker, gender, ct);
+                long t2 = Environment.TickCount64;
                 if (tr.Text.Length == 0 || Paused) continue;
                 // a translator gives back what it cannot read (junk from the screen) as it came: no Ukrainian letter, so
                 // nothing is said, instead of English or junk in a Ukrainian voice (owner, 23.11)
@@ -206,7 +210,9 @@ public sealed class DubPipeline : IDisposable
                 double pace = 1 + Math.Min(0.20, backlog * 0.08);
                 var req = new TtsRequest(tr.Text, gender, variant, tr.Mood, pace);
                 Log.Write($"UK{(tr.Offline ? " (offline)" : "")} [{speaker ?? "narrator"} → {_tts.Describe(req)}{(tr.Mood != null ? ", " + tr.Mood : "")}{(pace > 1 ? $", x{pace:F2}" : "")}]: {tr.Text}");
-                _audio.Writer.TryWrite((await _tts.SynthesizeAsync(req, ct), at));
+                var mp3 = await _tts.SynthesizeAsync(req, ct);
+                long t3 = Environment.TickCount64;
+                _audio.Writer.TryWrite((mp3, at, $"read {(t1 - at) / 1000.0:F1} s, translated {(t2 - t1) / 1000.0:F1} s, voiced {(t3 - t2) / 1000.0:F1} s"));
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (Exception ex) { Log.Error("speak", ex); }
@@ -233,11 +239,13 @@ public sealed class DubPipeline : IDisposable
 
     async Task PlayLoop(CancellationToken ct)
     {
-        await foreach (var (mp3, at) in _audio.Reader.ReadAllAsync(ct))
+        await foreach (var (mp3, at, timing) in _audio.Reader.ReadAllAsync(ct))
         {
             if (Paused) continue;
             long waited = Environment.TickCount64 - at;
             if (waited > StaleMs + 4000) { Log.Write($"skip stale audio ({waited / 1000.0:F1}s)"); continue; }
+            // from the line on screen to its voice: where the time went
+            Log.Write($"said {waited / 1000.0:F1} s after the line came on screen ({timing})");
             _playCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             try { await AudioPlayer.PlayAsync(mp3, _s.Volume, _playCts.Token); }
             catch (OperationCanceledException) { if (ct.IsCancellationRequested) break; }

@@ -293,9 +293,16 @@ public sealed class SubtitleTracker
     string _candidate = "";
     int _seen;
     string _spoken = "";
-    long _lastTextAt;
+    long _lastTextAt, _candidateAt;
 
-    public string? Push(string text)
+    /// <summary>When the line last returned was first seen on screen (TickCount64).</summary>
+    public long FirstSeen { get; private set; }
+
+    /// <summary>
+    /// A line is said once it was read the same twice, or at once when it is a whole clean sentence (ends with . ! ? …):
+    /// a second read waited ~0.5 s for nothing (owner, 24.11: «чого таким запізненням»).
+    /// </summary>
+    public string? Push(string text, bool clean = false)
     {
         long now = Environment.TickCount64;
         if (text.Length == 0)
@@ -306,10 +313,12 @@ public sealed class SubtitleTracker
         }
         _lastTextAt = now;
         if (TextTools.Similarity(text, _candidate) >= 0.85) _seen++;
-        else { _candidate = text; _seen = 1; }
+        else { _candidate = text; _seen = 1; _candidateAt = now; }
 
-        if (_seen != 2 || TextTools.Similarity(_candidate, _spoken) >= 0.8) return null;
+        bool whole = _seen == 1 && clean && text.TrimEnd('"', '»', '\'', ' ').Length > 0 && ".!?…".Contains(text.TrimEnd('"', '»', '\'', ' ')[^1]);
+        if ((_seen != 2 && !whole) || TextTools.Similarity(_candidate, _spoken) >= 0.8) return null;
         _spoken = _candidate;
+        FirstSeen = _candidateAt;
         return _candidate;
     }
 }
